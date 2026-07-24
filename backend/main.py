@@ -1,13 +1,18 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from database import init_db
-from api.routers import flows, playground, auth
+from api.routers import flows, playground, auth, video
 
 app = FastAPI(title="NodeList LLM API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3002",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3002",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -22,6 +27,7 @@ def startup():
 app.include_router(auth.router, prefix="/api")
 app.include_router(flows.router, prefix="/api")
 app.include_router(playground.router, prefix="/api")
+app.include_router(video.router, prefix="/api")
 
 
 @app.get("/health")

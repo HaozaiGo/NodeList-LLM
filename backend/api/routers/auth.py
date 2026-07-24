@@ -1,10 +1,11 @@
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from database import get_db
 from models import User
-from auth import hash_password, verify_password, create_access_token
+from auth import bearer, decode_token, hash_password, verify_password, create_access_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -54,5 +55,23 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
         )
+    token = create_access_token(user.id, user.email)
+    return TokenResponse(access_token=token, user_id=user.id, email=user.email)
+
+
+@router.post("/refresh", response_model=TokenResponse)
+def refresh(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer),
+    db: Session = Depends(get_db),
+):
+    if not credentials:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    payload = decode_token(credentials.credentials, verify_exp=False)
+    user_id = payload.get("sub")
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
     token = create_access_token(user.id, user.email)
     return TokenResponse(access_token=token, user_id=user.id, email=user.email)
