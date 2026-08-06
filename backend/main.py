@@ -1,7 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from database import init_db
-from api.routers import flows, playground, auth, video
+from api.routers import assets, flows, playground, auth, image, video
+from storage import storage
 
 app = FastAPI(title="NodeList LLM API")
 
@@ -25,9 +27,12 @@ def startup():
 
 
 app.include_router(auth.router, prefix="/api")
+app.include_router(assets.router, prefix="/api")
 app.include_router(flows.router, prefix="/api")
 app.include_router(playground.router, prefix="/api")
+app.include_router(image.router, prefix="/api")
 app.include_router(video.router, prefix="/api")
+app.mount("/uploads", StaticFiles(directory=storage.root), name="uploads")
 
 
 @app.get("/health")

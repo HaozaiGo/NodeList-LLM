@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, JSON, DateTime, ForeignKey, func
+from sqlalchemy import Column, Integer, String, JSON, DateTime, ForeignKey, func
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
@@ -29,3 +29,22 @@ class Flow(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
     owner = relationship("User", back_populates="flows")
+
+
+class Asset(Base):
+    __tablename__ = "assets"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    flow_id = Column(String, ForeignKey("flows.id"), nullable=True, index=True)
+    node_id = Column(String, nullable=True, index=True)
+    kind = Column(String, nullable=False, index=True)
+    title = Column(String, nullable=False)
+    mime_type = Column(String, nullable=False)
+    storage_key = Column(String, nullable=False)
+    public_url = Column(String, nullable=False)
+    size_bytes = Column(Integer, nullable=False, default=0)
+    provider = Column(String, nullable=False, default="local")
+    remote_id = Column(String, nullable=True, index=True)
+    asset_metadata = Column("metadata", JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, server_default=func.now())

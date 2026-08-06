@@ -19,3 +19,4 @@ httpx
 python-multipart==0.0.20
 beautifulsoup4
 asteval
+tos>=2.9.0

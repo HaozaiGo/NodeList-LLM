@@ -38,6 +38,12 @@ def migrate_sqlite_schema():
                 {"user_id": first_user_id},
             )
 
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_assets_user_id ON assets (user_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_assets_flow_id ON assets (flow_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_assets_node_id ON assets (node_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_assets_kind ON assets (kind)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_assets_remote_id ON assets (remote_id)"))
+
 
 def get_db():
     db = SessionLocal()

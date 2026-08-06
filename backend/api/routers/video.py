@@ -30,6 +30,22 @@ TOKENOPS_VIDEO_MODEL = os.getenv(
 TOKENOPS_VIDEO_ANALYSIS_MODE = os.getenv("TOKENOPS_VIDEO_ANALYSIS_MODE", "gemini").strip().lower()
 TOKENOPS_GEMINI_MODEL = os.getenv("TOKENOPS_GEMINI_MODEL", "gemini-2.5-flash").strip()
 TOKENOPS_GENERATION_MODEL = os.getenv("TOKENOPS_GENERATION_MODEL", "doubao-seedance-1-5-pro-251215").strip()
+TOKENOPS_GENERATION_MODELS = os.getenv(
+    "TOKENOPS_GENERATION_MODELS",
+    ",".join(
+        [
+            "doubao-seedance-1-5-pro-251215:Seedance 1.5 Pro",
+            "seedance-2-0:Seedance 2.0",
+            "seedance-2-0-fast:Seedance 2.0 Fast",
+            "seedance-2-0-mini:Seedance 2.0 Mini",
+            "kling-3-0:Kling 3.0",
+            "kling-3-0-omni:Kling 3.0 Omni",
+            "veo-3-1:Veo 3.1",
+            "veo-3-1-fast:Veo 3.1 Fast",
+            "gemini-omni-flash:Gemini Omni Flash",
+        ]
+    ),
+)
 TOKENOPS_ASR_MODEL = os.getenv("TOKENOPS_ASR_MODEL", "whisper-1")
 TOKENOPS_ASR_PATH = os.getenv("TOKENOPS_ASR_PATH", "/v1/audio/transcriptions")
 TOKENOPS_INLINE_VIDEO_MAX_BYTES = int(os.getenv("TOKENOPS_INLINE_VIDEO_MAX_MB", "64")) * 1024 * 1024
@@ -85,12 +101,40 @@ GEMINI_VIDEO_ANALYSIS_PROMPT = """你是专业短视频拆解助手。请直接�
 
 class VideoGenerateRequest(BaseModel):
     prompt: str
+    model: str = TOKENOPS_GENERATION_MODEL
     ratio: str = "9:16"
     resolution: str = "720p"
     seconds: int = 8
     generate_audio: bool = True
     watermark: bool = False
     camerafixed: bool = False
+
+
+def _video_model_options() -> list[dict[str, str]]:
+    options: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw_item in TOKENOPS_GENERATION_MODELS.split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+        model, _, label = item.partition(":")
+        model = model.strip()
+        if not model or model in seen:
+            continue
+        options.append({"model": model, "label": label.strip() or model})
+        seen.add(model)
+
+    if TOKENOPS_GENERATION_MODEL and TOKENOPS_GENERATION_MODEL not in seen:
+        options.insert(0, {"model": TOKENOPS_GENERATION_MODEL, "label": TOKENOPS_GENERATION_MODEL})
+    return options
+
+
+def _select_generation_model(payload: VideoGenerateRequest) -> str:
+    requested = payload.model.strip() or TOKENOPS_GENERATION_MODEL
+    allowed = {item["model"] for item in _video_model_options()}
+    if requested not in allowed:
+        raise HTTPException(status_code=400, detail="不支持的视频生成模型")
+    return requested
 
 
 def _tokenops_key() -> str:
@@ -874,12 +918,18 @@ def _audio_note(transcript: dict[str, Any]) -> str:
 def _validate_generation_request(payload: VideoGenerateRequest) -> None:
     if not payload.prompt.strip():
         raise HTTPException(status_code=400, detail="生成提示词不能为空")
+    _select_generation_model(payload)
     if payload.ratio not in SEEDANCE_RATIOS:
         raise HTTPException(status_code=400, detail="不支持的视频比例")
     if payload.resolution not in SEEDANCE_RESOLUTIONS:
         raise HTTPException(status_code=400, detail="不支持的视频分辨率")
     if payload.seconds not in SEEDANCE_SECONDS:
         raise HTTPException(status_code=400, detail="Seedance 1.5 Pro 时长需在 4-12 秒之间")
+
+
+@router.get("/models")
+async def list_video_generation_models(_: User = Depends(get_current_user)):
+    return {"models": _video_model_options(), "default": TOKENOPS_GENERATION_MODEL}
 
 
 @router.post("/generate")
@@ -889,8 +939,9 @@ async def generate_video(
 ):
     _validate_generation_request(payload)
     key = _tokenops_key()
+    model = _select_generation_model(payload)
     request_payload = {
-        "model": TOKENOPS_GENERATION_MODEL,
+        "model": model,
         "content": [{"type": "text", "text": payload.prompt.strip()}],
         "ratio": payload.ratio,
         "resolution": payload.resolution,
@@ -922,8 +973,9 @@ async def generate_video(
     result = response.json()
     return {
         **result,
-        "model": result.get("model") or TOKENOPS_GENERATION_MODEL,
+        "model": result.get("model") or model,
         "request": {
+            "model": model,
             "ratio": payload.ratio,
             "resolution": payload.resolution,
             "seconds": payload.seconds,
