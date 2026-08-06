@@ -4,23 +4,28 @@ import re
 import base64
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
-from typing import Any
-from urllib.parse import quote
+from typing import Any, Optional
+from urllib.parse import quote, urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from auth import get_current_user
-from models import User
+from database import get_db
+from lovart import LovartAPIError, LovartClient
+from models import Asset, User
+from storage import safe_storage_name, storage
 
 router = APIRouter(prefix="/video", tags=["video"])
 
 SEEDANCE_RATIOS = {"16:9", "4:3", "1:1", "3:4", "9:16", "21:9"}
-SEEDANCE_RESOLUTIONS = {"480p", "720p", "1080p"}
-SEEDANCE_SECONDS = {4, 5, 6, 7, 8, 9, 10, 11, 12}
+SEEDANCE_RESOLUTIONS = {"480p", "720p", "1080p", "4k"}
+SEEDANCE_SECONDS = {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
 
 TOKENOPS_BASE_URL = os.getenv("TOKENOPS_BASE_URL", "https://api.tokenops.ai").rstrip("/")
 TOKENOPS_VIDEO_MODEL = os.getenv(
@@ -30,10 +35,15 @@ TOKENOPS_VIDEO_MODEL = os.getenv(
 TOKENOPS_VIDEO_ANALYSIS_MODE = os.getenv("TOKENOPS_VIDEO_ANALYSIS_MODE", "gemini").strip().lower()
 TOKENOPS_GEMINI_MODEL = os.getenv("TOKENOPS_GEMINI_MODEL", "gemini-2.5-flash").strip()
 TOKENOPS_GENERATION_MODEL = os.getenv("TOKENOPS_GENERATION_MODEL", "doubao-seedance-1-5-pro-251215").strip()
+BDS_PRO_MODEL = "bds-pro"
+TOKENOPS_SEEDANCE_15_MODEL = "doubao-seedance-1-5-pro-251215"
+LOVART_VIDEO_PREFIX = "lovart:"
+BDS_A2_BASE_URL = os.getenv("BDS_A2_BASE_URL", os.getenv("A2_VIDEO_BASE_URL", "https://cu-api.uniphore-ai.com")).rstrip("/")
 TOKENOPS_GENERATION_MODELS = os.getenv(
     "TOKENOPS_GENERATION_MODELS",
     ",".join(
         [
+            f"{BDS_PRO_MODEL}:Bds Pro",
             "doubao-seedance-1-5-pro-251215:Seedance 1.5 Pro",
             "seedance-2-0:Seedance 2.0",
             "seedance-2-0-fast:Seedance 2.0 Fast",
@@ -108,6 +118,7 @@ class VideoGenerateRequest(BaseModel):
     generate_audio: bool = True
     watermark: bool = False
     camerafixed: bool = False
+    reference_images: list[str] = Field(default_factory=list)
 
 
 def _video_model_options() -> list[dict[str, str]]:
@@ -137,11 +148,413 @@ def _select_generation_model(payload: VideoGenerateRequest) -> str:
     return requested
 
 
+def _is_bds_model(model: str) -> bool:
+    return model == BDS_PRO_MODEL
+
+
+def _is_tokenops_video_model(model: str) -> bool:
+    return model == TOKENOPS_SEEDANCE_15_MODEL
+
+
 def _tokenops_key() -> str:
     key = os.getenv("TOKENOPS_API_KEY", "").strip()
     if not key:
         raise HTTPException(status_code=500, detail="TOKENOPS_API_KEY is not configured")
     return key
+
+
+def _asset_from_reference(db: Session, user: User, reference: str) -> Optional[Asset]:
+    path = urlparse(reference).path or reference
+    match = re.search(r"/api/assets/([^/]+)/(?:public-content|content)$", path)
+    if not match:
+        return None
+    asset = db.get(Asset, match.group(1))
+    if not asset or asset.user_id != user.id:
+        return None
+    return asset
+
+
+def _resolve_lovart_reference_images(db: Session, user: User, references: list[str]) -> list[str]:
+    resolved: list[str] = []
+    for reference in references:
+        value = reference.strip()
+        if not value:
+            continue
+        asset = _asset_from_reference(db, user, value)
+        if asset:
+            resolved.append(storage.presign_download(asset.storage_key, asset.title))
+            continue
+        if value.startswith("blob:"):
+            continue
+        resolved.append(value)
+    return resolved
+
+
+async def _image_reference_to_data_url(db: Session, user: User, reference: str) -> tuple[str, str]:
+    value = reference.strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="Bds Pro 需要首帧图片")
+    if value.startswith("data:image/"):
+        return value, "source.png"
+    if value.startswith("blob:"):
+        raise HTTPException(status_code=400, detail="图片还在本地预览中，请等待上传完成后再生成视频")
+
+    asset = _asset_from_reference(db, user, value)
+    if asset:
+        try:
+            path = storage.ensure_local(asset.storage_key)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="首帧图片文件不存在") from exc
+        data = path.read_bytes()
+        mime_type = asset.mime_type or "image/png"
+        filename = safe_storage_name(asset.title or path.name)
+        return f"data:{mime_type};base64,{base64.b64encode(data).decode()}", filename
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=20), follow_redirects=True) as client:
+            response = await client.get(value)
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Bds Pro 首帧图片下载失败：{exc}") from exc
+
+    mime_type = response.headers.get("content-type") or "image/png"
+    if not mime_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Bds Pro 首帧必须是图片")
+    filename = safe_storage_name(Path(urlparse(value).path).name or "source.png")
+    return f"data:{mime_type};base64,{base64.b64encode(response.content).decode()}", filename
+
+
+def _bds_dimensions(ratio: str, resolution: str) -> tuple[int, int]:
+    base_by_ratio = {
+        "9:16": (704, 1024),
+        "16:9": (1024, 576),
+        "1:1": (768, 768),
+        "3:4": (768, 1024),
+        "4:3": (1024, 768),
+        "21:9": (1280, 544),
+    }
+    width, height = base_by_ratio.get(ratio, base_by_ratio["9:16"])
+    if resolution == "1080p":
+        scale = 1080 / max(width, height)
+        return int(width * scale) // 8 * 8, int(height * scale) // 8 * 8
+    if resolution == "480p":
+        scale = 640 / max(width, height)
+        return int(width * scale) // 8 * 8, int(height * scale) // 8 * 8
+    return width, height
+
+
+async def _bds_upload_image(client: httpx.AsyncClient, data_url: str, filename: str) -> str:
+    response = await client.post(
+        f"{BDS_A2_BASE_URL}/api/upload",
+        json={"image": {"filename": filename, "data_url": data_url}},
+    )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail=_remote_error(response, "Bds Pro image upload failed"))
+    data = response.json()
+    image = str(data.get("image") or "").strip()
+    if not image:
+        raise HTTPException(status_code=502, detail="Bds Pro 上传首帧后未返回 image")
+    return image
+
+
+async def _create_bds_video(payload: VideoGenerateRequest, db: Session, user: User) -> dict[str, Any]:
+    references = [item for item in payload.reference_images if item.strip()]
+    if not references:
+        raise HTTPException(status_code=400, detail="Bds Pro 图生视频需要至少一张上游图片作为首帧")
+
+    first_frame, first_filename = await _image_reference_to_data_url(db, user, references[0])
+    face_frame: Optional[tuple[str, str]] = None
+    if len(references) > 1:
+        face_frame = await _image_reference_to_data_url(db, user, references[1])
+
+    width, height = _bds_dimensions(payload.ratio, payload.resolution)
+    request_payload: dict[str, Any] = {
+        "positive_prompt": payload.prompt.strip(),
+        "negative_prompt": "blurry, out of focus, bad anatomy, extra limbs, duplicate person, watermark, text, logo",
+        "seconds": payload.seconds,
+        "steps": 13,
+        "cfg": 1.0,
+        "shift": 5.0,
+        "painter": 1.03,
+        "lynx": 0.04 if face_frame else 0,
+        "width": width,
+        "height": height,
+        "frame_rate": 16.2,
+        "crf": 10,
+        "seed": -1,
+        "postprocess": {"speech": "auto", "blush": "auto"},
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=20)) as client:
+            request_payload["image"] = await _bds_upload_image(client, first_frame, first_filename)
+            if face_frame:
+                request_payload["face_image"] = await _bds_upload_image(client, face_frame[0], face_frame[1])
+            response = await client.post(f"{BDS_A2_BASE_URL}/api/generate", json=request_payload)
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="Bds Pro 视频生成任务创建超时，请稍后重试") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Bds Pro 视频生成请求失败：{exc}") from exc
+
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail=_remote_error(response, "Bds Pro video generation failed"))
+
+    result = response.json()
+    task_id = str(result.get("task_id") or result.get("id") or "").strip()
+    if not task_id:
+        task_id = uuid.uuid4().hex
+    return {
+        **result,
+        "id": f"{BDS_PRO_MODEL}:{task_id}",
+        "model": BDS_PRO_MODEL,
+        "status": result.get("state") or result.get("status") or "queued",
+        "request": {
+            "model": BDS_PRO_MODEL,
+            "ratio": payload.ratio,
+            "resolution": payload.resolution,
+            "seconds": payload.seconds,
+            "width": width,
+            "height": height,
+        },
+    }
+
+
+def _bds_task_id(video_id: str) -> str:
+    return video_id.split(":", 1)[1] if video_id.startswith(f"{BDS_PRO_MODEL}:") else video_id
+
+
+def _normalize_bds_status(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"completed", "complete", "success", "succeeded", "done"}:
+        return "completed"
+    if normalized in {"failed", "error"}:
+        return "failed"
+    if normalized in {"queued", "pending", "in_queue"}:
+        return "queued"
+    return "running"
+
+
+def _absolute_bds_url(value: str) -> str:
+    if value.startswith("http://") or value.startswith("https://"):
+        return value
+    return f"{BDS_A2_BASE_URL}/{value.lstrip('/')}"
+
+
+def _append_video_url(urls: list[str], value: str) -> None:
+    text = value.strip().rstrip(").,，。")
+    if not text.startswith(("http://", "https://")):
+        return
+    lower = text.lower()
+    if re.search(r"\.(?:png|jpe?g|webp|gif)(?:\?|$)", lower):
+        return
+    if re.search(r"\.(?:mp4|mov|webm|m4v)(?:\?|$)", lower) or "video" in lower:
+        urls.append(text)
+
+
+def _extract_video_urls(data: Any) -> list[str]:
+    urls: list[str] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                lower_key = str(key).lower()
+                if lower_key in {"url", "src", "video", "video_url", "videourl", "download_url", "downloadurl", "content_url", "contenturl"}:
+                    if isinstance(item, str):
+                        _append_video_url(urls, item)
+                    else:
+                        visit(item)
+                else:
+                    visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+        elif isinstance(value, str):
+            for match in re.findall(r"https?://[^\s\"'<>]+", value):
+                _append_video_url(urls, match)
+
+    visit(data)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        if url not in seen:
+            seen.add(url)
+            deduped.append(url)
+    return deduped
+
+
+async def _get_bds_result(task_id: str) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=20), follow_redirects=True) as client:
+        response = await client.get(f"{BDS_A2_BASE_URL}/result/{task_id}")
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail=_remote_error(response, "Bds Pro result failed"))
+    data = response.json()
+    return data if isinstance(data, dict) else {}
+
+
+async def _get_bds_status(video_id: str) -> dict[str, Any]:
+    task_id = _bds_task_id(video_id)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=20), follow_redirects=True) as client:
+            response = await client.get(f"{BDS_A2_BASE_URL}/status/{task_id}")
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="Bds Pro 状态查询超时，请稍后重试") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Bds Pro 状态查询失败：{exc}") from exc
+
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail=_remote_error(response, "Bds Pro status failed"))
+
+    data = response.json()
+    if not isinstance(data, dict):
+        data = {}
+    status = _normalize_bds_status(data.get("state") or data.get("status"))
+    result: dict[str, Any] = {}
+    if status == "completed":
+        result = await _get_bds_result(task_id)
+    return {
+        **data,
+        "id": f"{BDS_PRO_MODEL}:{task_id}",
+        "model": BDS_PRO_MODEL,
+        "status": status,
+        "result": result,
+        "content_path": f"/api/video/generate/{BDS_PRO_MODEL}:{task_id}/content" if status == "completed" else "",
+    }
+
+
+async def _download_bds_video(video_id: str) -> tuple[bytes, str]:
+    task_id = _bds_task_id(video_id)
+    result = await _get_bds_result(task_id)
+    output = result.get("output") if isinstance(result.get("output"), dict) else {}
+    url = str(output.get("url") or result.get("url") or "").strip()
+    if not url:
+        raise HTTPException(status_code=404, detail="Bds Pro 结果未返回视频 URL")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20), follow_redirects=True) as client:
+            response = await client.get(_absolute_bds_url(url))
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Bds Pro 视频下载失败：{exc}") from exc
+    return response.content, response.headers.get("content-type") or "video/mp4"
+
+
+def _lovart_video_id(task_id: str) -> str:
+    return f"{LOVART_VIDEO_PREFIX}{task_id}"
+
+
+def _lovart_task_id(video_id: str) -> str:
+    return video_id.split(":", 1)[1] if video_id.startswith(LOVART_VIDEO_PREFIX) else video_id
+
+
+def _normalize_lovart_video_status(status: Any, video_urls: list[str]) -> str:
+    value = str(status or "").strip().lower()
+    if video_urls or value in {"done", "completed", "complete", "success", "succeeded"}:
+        return "completed" if video_urls else "running"
+    if value in {"failed", "fail", "error"}:
+        return "failed"
+    return "running"
+
+
+def _lovart_video_prompt(payload: VideoGenerateRequest, model: str) -> str:
+    constraints = [
+        "请立即生成一段真实可下载的视频 artifact，不要只回复文本、脚本或分析。",
+        "请使用 Lovart 视频生成能力生成成片。",
+        f"指定视频模型：{model}。",
+        f"画幅比例：{payload.ratio}。",
+        f"分辨率：{payload.resolution}。",
+        f"时长：{payload.seconds}s。",
+        "保持参考图中的人物身份、五官、发型、服装和气质一致。",
+        "保持画面自然、清晰、无水印、无字幕。",
+    ]
+    if payload.generate_audio:
+        constraints.append("如模型支持，请生成或保留匹配画面的音频。")
+    else:
+        constraints.append("不要生成音频。")
+    if payload.camerafixed:
+        constraints.append("镜头尽量固定，减少不必要的运镜。")
+
+    return "\n".join(constraints) + f"\n\n视频要求：\n{payload.prompt.strip()}"
+
+
+async def _create_lovart_video(payload: VideoGenerateRequest, db: Session, user: User, model: str) -> dict[str, Any]:
+    references = _resolve_lovart_reference_images(db, user, payload.reference_images)
+    request = {
+        "model": model,
+        "prompt": _lovart_video_prompt(payload, model),
+        "output_type": "video",
+        "reference_images": references,
+        "ratio": payload.ratio,
+        "resolution": payload.resolution,
+        "seconds": payload.seconds,
+        "generate_audio": payload.generate_audio,
+        "watermark": payload.watermark,
+        "camerafixed": payload.camerafixed,
+    }
+    try:
+        result = await LovartClient().create_task(request)
+    except LovartAPIError as exc:
+        status = exc.status_code if exc.status_code >= 400 else 502
+        if exc.status_code == 0:
+            status = 500
+        raise HTTPException(status_code=status, detail=exc.detail) from exc
+
+    return {
+        "id": _lovart_video_id(result.task_id),
+        "model": model,
+        "status": "running",
+        "projectId": result.request_id,
+        "request": {
+            "provider": "lovart",
+            "model": model,
+            "ratio": payload.ratio,
+            "resolution": payload.resolution,
+            "seconds": payload.seconds,
+            "generate_audio": payload.generate_audio,
+            "watermark": payload.watermark,
+            "camerafixed": payload.camerafixed,
+            "reference_image_count": len(references),
+        },
+    }
+
+
+async def _get_lovart_video_status(video_id: str) -> dict[str, Any]:
+    task_id = _lovart_task_id(video_id)
+    try:
+        task = await LovartClient().get_task(task_id)
+    except LovartAPIError as exc:
+        status = exc.status_code if exc.status_code >= 400 else 502
+        if exc.status_code == 0:
+            status = 500
+        raise HTTPException(status_code=status, detail=exc.detail) from exc
+
+    video_urls = _extract_video_urls(task)
+    status = _normalize_lovart_video_status(task.get("status"), video_urls)
+    error = None
+    if status == "running" and str(task.get("status") or "").lower() in {"done", "completed", "complete", "success", "succeeded"}:
+        error = "Lovart 已完成但未返回视频结果"
+        status = "failed"
+    return {
+        "id": video_id,
+        "model": "lovart-video",
+        "status": status,
+        "videoUrls": video_urls,
+        "error": error,
+        "raw": task,
+        "content_path": f"/api/video/generate/{video_id}/content" if status == "completed" and video_urls else "",
+    }
+
+
+async def _download_lovart_video(video_id: str) -> tuple[bytes, str]:
+    status = await _get_lovart_video_status(video_id)
+    urls = status.get("videoUrls")
+    if not isinstance(urls, list) or not urls:
+        raise HTTPException(status_code=404, detail="Lovart 视频结果不存在")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20), follow_redirects=True) as client:
+            response = await client.get(str(urls[0]))
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Lovart 视频下载失败：{exc}") from exc
+    return response.content, response.headers.get("content-type") or "video/mp4"
 
 
 def _require_video(file: UploadFile) -> None:
@@ -924,7 +1337,7 @@ def _validate_generation_request(payload: VideoGenerateRequest) -> None:
     if payload.resolution not in SEEDANCE_RESOLUTIONS:
         raise HTTPException(status_code=400, detail="不支持的视频分辨率")
     if payload.seconds not in SEEDANCE_SECONDS:
-        raise HTTPException(status_code=400, detail="Seedance 1.5 Pro 时长需在 4-12 秒之间")
+        raise HTTPException(status_code=400, detail="Seedance 1.5 Pro 时长需在 4-15 秒之间")
 
 
 @router.get("/models")
@@ -935,14 +1348,35 @@ async def list_video_generation_models(_: User = Depends(get_current_user)):
 @router.post("/generate")
 async def generate_video(
     payload: VideoGenerateRequest,
-    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     _validate_generation_request(payload)
-    key = _tokenops_key()
     model = _select_generation_model(payload)
+    if _is_bds_model(model):
+        return await _create_bds_video(payload, db, user)
+    if not _is_tokenops_video_model(model):
+        return await _create_lovart_video(payload, db, user, model)
+
+    key = _tokenops_key()
+    content: list[dict[str, Any]] = [{"type": "text", "text": payload.prompt.strip()}]
+    reference_count = 0
+    for reference in [item for item in payload.reference_images if item.strip()][:4]:
+        image_data_url, _ = await _image_reference_to_data_url(db, user, reference)
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_data_url,
+                    "detail": "high",
+                },
+            }
+        )
+        reference_count += 1
+
     request_payload = {
         "model": model,
-        "content": [{"type": "text", "text": payload.prompt.strip()}],
+        "content": content,
         "ratio": payload.ratio,
         "resolution": payload.resolution,
         "seconds": str(payload.seconds),
@@ -982,6 +1416,7 @@ async def generate_video(
             "generate_audio": payload.generate_audio,
             "watermark": payload.watermark,
             "camerafixed": payload.camerafixed,
+            "reference_image_count": reference_count,
         },
     }
 
@@ -991,6 +1426,11 @@ async def get_generated_video_status(
     video_id: str,
     _: User = Depends(get_current_user),
 ):
+    if video_id.startswith(f"{BDS_PRO_MODEL}:"):
+        return await _get_bds_status(video_id)
+    if video_id.startswith(LOVART_VIDEO_PREFIX):
+        return await _get_lovart_video_status(video_id)
+
     key = _tokenops_key()
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=20)) as client:
@@ -1018,6 +1458,13 @@ async def download_generated_video(
     video_id: str,
     _: User = Depends(get_current_user),
 ):
+    if video_id.startswith(f"{BDS_PRO_MODEL}:"):
+        content, media_type = await _download_bds_video(video_id)
+        return Response(content=content, media_type=media_type)
+    if video_id.startswith(LOVART_VIDEO_PREFIX):
+        content, media_type = await _download_lovart_video(video_id)
+        return Response(content=content, media_type=media_type)
+
     key = _tokenops_key()
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20)) as client:

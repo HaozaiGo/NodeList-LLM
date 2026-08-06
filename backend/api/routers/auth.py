@@ -55,6 +55,8 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
         )
+    if user.disabled_at is not None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
     token = create_access_token(user.id, user.email)
     return TokenResponse(access_token=token, user_id=user.id, email=user.email)
 
@@ -72,6 +74,8 @@ def refresh(
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    if user.disabled_at is not None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
 
     token = create_access_token(user.id, user.email)
     return TokenResponse(access_token=token, user_id=user.id, email=user.email)

@@ -18,6 +18,8 @@ from storage import object_key_for_asset, safe_storage_name, storage
 router = APIRouter(prefix="/assets", tags=["assets"])
 
 TOKENOPS_BASE_URL = os.getenv("TOKENOPS_BASE_URL", "https://api.tokenops.ai").rstrip("/")
+BDS_PRO_MODEL = "bds-pro"
+BDS_A2_BASE_URL = os.getenv("BDS_A2_BASE_URL", os.getenv("A2_VIDEO_BASE_URL", "https://cu-api.uniphore-ai.com")).rstrip("/")
 
 
 class FinishedVideoAssetCreate(BaseModel):
@@ -47,6 +49,11 @@ class AssetOut(BaseModel):
     flowId: Optional[str]
     nodeId: Optional[str]
     metadata: dict[str, Any]
+
+
+class AssetUpdate(BaseModel):
+    title: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 def _tokenops_key() -> str:
@@ -120,6 +127,44 @@ async def _download_tokenops_video(task_id: str) -> tuple[bytes, str]:
     return response.content, response.headers.get("content-type") or "video/mp4"
 
 
+def _bds_task_id(task_id: str) -> str:
+    return task_id.split(":", 1)[1] if task_id.startswith(f"{BDS_PRO_MODEL}:") else task_id
+
+
+def _absolute_bds_url(value: str) -> str:
+    if value.startswith("http://") or value.startswith("https://"):
+        return value
+    return f"{BDS_A2_BASE_URL}/{value.lstrip('/')}"
+
+
+async def _download_bds_video(task_id: str) -> tuple[bytes, str]:
+    remote_id = _bds_task_id(task_id)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20), follow_redirects=True) as client:
+            result_response = await client.get(f"{BDS_A2_BASE_URL}/result/{remote_id}")
+            result_response.raise_for_status()
+            result = result_response.json()
+            output = result.get("output") if isinstance(result.get("output"), dict) else {}
+            url = str(output.get("url") or result.get("url") or "").strip()
+            if not url:
+                raise HTTPException(status_code=404, detail="Bds Pro 结果未返回视频 URL")
+            video_response = await client.get(_absolute_bds_url(url))
+            video_response.raise_for_status()
+    except HTTPException:
+        raise
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Bds Pro 视频下载失败：{exc}") from exc
+    return video_response.content, video_response.headers.get("content-type") or "video/mp4"
+
+
+async def _download_finished_video(task_id: str) -> tuple[bytes, str, str]:
+    if task_id.startswith(f"{BDS_PRO_MODEL}:"):
+        content, mime_type = await _download_bds_video(task_id)
+        return content, mime_type, "bds-pro"
+    content, mime_type = await _download_tokenops_video(task_id)
+    return content, mime_type, "tokenops"
+
+
 @router.get("/", response_model=list[AssetOut])
 def list_assets(
     kind: Optional[str] = Query(default=None),
@@ -156,7 +201,7 @@ async def create_finished_video_asset(
     if existing:
         return asset_to_dict(existing)
 
-    content, mime_type = await _download_tokenops_video(payload.taskId)
+    content, mime_type, provider = await _download_finished_video(payload.taskId)
     asset_id = str(uuid.uuid4())
     filename = f"{safe_storage_name(payload.title or 'generated-video')}.mp4"
     storage_key = object_key_for_asset(asset_id, "finished_video", filename)
@@ -172,7 +217,7 @@ async def create_finished_video_asset(
         storage_key=stored.storage_key,
         public_url=stored.public_url,
         size_bytes=stored.size,
-        provider="tokenops",
+        provider=provider,
         remote_id=payload.taskId,
         asset_metadata={
             **payload.metadata,
@@ -225,6 +270,26 @@ async def upload_asset(
         remote_id=None,
         asset_metadata={"tag": tag or ""},
     )
+    db.add(asset)
+    db.commit()
+    db.refresh(asset)
+    return asset_to_dict(asset)
+
+
+@router.patch("/{asset_id}", response_model=AssetOut)
+def update_asset(
+    asset_id: str,
+    payload: AssetUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    asset = db.get(Asset, asset_id)
+    if not asset or asset.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if payload.title is not None and payload.title.strip():
+        asset.title = payload.title.strip()
+    if payload.metadata:
+        asset.asset_metadata = {**(asset.asset_metadata or {}), **payload.metadata}
     db.add(asset)
     db.commit()
     db.refresh(asset)

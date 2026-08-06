@@ -12,9 +12,18 @@ class User(Base):
     id = Column(String, primary_key=True)
     email = Column(String, unique=True, nullable=False, index=True)
     hashed_password = Column(String, nullable=False)
+    role = Column(String, nullable=False, default="user", server_default="user", index=True)
+    credit_balance = Column(Integer, nullable=False, default=0, server_default="0")
+    disabled_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
     flows = relationship("Flow", back_populates="owner", cascade="all, delete-orphan")
+    credit_transactions = relationship(
+        "CreditTransaction",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        foreign_keys="CreditTransaction.user_id",
+    )
 
 
 class Flow(Base):
@@ -48,3 +57,19 @@ class Asset(Base):
     remote_id = Column(String, nullable=True, index=True)
     asset_metadata = Column("metadata", JSON, nullable=False, default=dict)
     created_at = Column(DateTime, server_default=func.now())
+
+
+class CreditTransaction(Base):
+    __tablename__ = "credit_transactions"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    admin_id = Column(String, ForeignKey("users.id"), nullable=True, index=True)
+    amount = Column(Integer, nullable=False)
+    balance_after = Column(Integer, nullable=False)
+    transaction_type = Column(String, nullable=False, default="manual_adjustment", index=True)
+    note = Column(String, nullable=False, default="")
+    created_at = Column(DateTime, server_default=func.now(), index=True)
+
+    user = relationship("User", foreign_keys=[user_id], back_populates="credit_transactions")
+    admin = relationship("User", foreign_keys=[admin_id])

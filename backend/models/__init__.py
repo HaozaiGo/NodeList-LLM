@@ -1,3 +1,3 @@
-from .flow import Asset, Base, User, Flow
+from .flow import Asset, Base, CreditTransaction, User, Flow
 
-__all__ = ["Asset", "Base", "User", "Flow"]
+__all__ = ["Asset", "Base", "CreditTransaction", "User", "Flow"]

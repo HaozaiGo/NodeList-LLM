@@ -58,7 +58,7 @@ def list_flows(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    return db.query(Flow).filter(Flow.user_id == user.id).all()
+    return db.query(Flow).filter(Flow.user_id == user.id).order_by(Flow.updated_at.desc(), Flow.created_at.desc()).all()
 
 
 @router.post("/", response_model=FlowOut, status_code=201)

@@ -14,21 +14,55 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db():
     Base.metadata.create_all(bind=engine)
-    migrate_sqlite_schema()
+    migrate_schema()
 
 
-def migrate_sqlite_schema():
-    if engine.dialect.name != "sqlite":
-        return
-
+def migrate_schema():
     inspector = inspect(engine)
-    if "flows" not in inspector.get_table_names():
+    table_names = inspector.get_table_names()
+    if "users" not in table_names:
         return
 
-    flow_columns = {column["name"] for column in inspector.get_columns("flows")}
+    user_columns = {column["name"] for column in inspector.get_columns("users")}
     with engine.begin() as conn:
+        if "role" not in user_columns:
+            if engine.dialect.name == "sqlite":
+                conn.execute(text("ALTER TABLE users ADD COLUMN role VARCHAR NOT NULL DEFAULT 'user'"))
+            else:
+                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR NOT NULL DEFAULT 'user'"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_role ON users (role)"))
+
+        if "credit_balance" not in user_columns:
+            if engine.dialect.name == "sqlite":
+                conn.execute(text("ALTER TABLE users ADD COLUMN credit_balance INTEGER NOT NULL DEFAULT 0"))
+            else:
+                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS credit_balance INTEGER NOT NULL DEFAULT 0"))
+
+        if "disabled_at" not in user_columns:
+            if engine.dialect.name == "sqlite":
+                conn.execute(text("ALTER TABLE users ADD COLUMN disabled_at DATETIME"))
+            else:
+                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMP"))
+
+        admin_emails = [email.strip().lower() for email in os.getenv("ADMIN_EMAILS", "").split(",") if email.strip()]
+        for email in admin_emails:
+            conn.execute(text("UPDATE users SET role = 'admin' WHERE lower(email) = :email"), {"email": email})
+
+        admin_count = conn.execute(text("SELECT COUNT(*) FROM users WHERE role = 'admin'")).scalar() or 0
+        if admin_count == 0:
+            first_user_id = conn.execute(text("SELECT id FROM users ORDER BY created_at LIMIT 1")).scalar()
+            if first_user_id:
+                conn.execute(text("UPDATE users SET role = 'admin' WHERE id = :user_id"), {"user_id": first_user_id})
+
+        if "flows" not in table_names:
+            return
+
+        flow_columns = {column["name"] for column in inspector.get_columns("flows")}
         if "user_id" not in flow_columns:
-            conn.execute(text("ALTER TABLE flows ADD COLUMN user_id VARCHAR"))
+            if engine.dialect.name == "sqlite":
+                conn.execute(text("ALTER TABLE flows ADD COLUMN user_id VARCHAR"))
+            else:
+                conn.execute(text("ALTER TABLE flows ADD COLUMN IF NOT EXISTS user_id VARCHAR"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_flows_user_id ON flows (user_id)"))
 
         first_user_id = conn.execute(text("SELECT id FROM users ORDER BY created_at LIMIT 1")).scalar()
