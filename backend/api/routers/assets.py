@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from auth import get_current_user
 from database import get_db
+from api.routers.video import LOVART_VIDEO_PREFIX, _download_lovart_video
 from models import Asset, Flow, User
 from storage import object_key_for_asset, safe_storage_name, storage
 
@@ -31,6 +32,10 @@ class FinishedVideoAssetCreate(BaseModel):
     resolution: Optional[str] = None
     seconds: Optional[Union[str, int]] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProjectVideoCacheCreate(FinishedVideoAssetCreate):
+    pass
 
 
 class AssetOut(BaseModel):
@@ -161,8 +166,85 @@ async def _download_finished_video(task_id: str) -> tuple[bytes, str, str]:
     if task_id.startswith(f"{BDS_PRO_MODEL}:"):
         content, mime_type = await _download_bds_video(task_id)
         return content, mime_type, "bds-pro"
+    if task_id.startswith(LOVART_VIDEO_PREFIX):
+        content, mime_type = await _download_lovart_video(task_id)
+        return content, mime_type, "lovart"
     content, mime_type = await _download_tokenops_video(task_id)
     return content, mime_type, "tokenops"
+
+
+async def _create_video_record(
+    payload: FinishedVideoAssetCreate,
+    *,
+    kind: str,
+    default_title: str,
+    db: Session,
+    user: User,
+) -> AssetOut:
+    _ensure_flow_owner(db, payload.flowId, user)
+
+    existing = (
+        db.query(Asset)
+        .filter(
+            Asset.user_id == user.id,
+            Asset.kind == kind,
+            Asset.remote_id == payload.taskId,
+            Asset.node_id == payload.nodeId,
+        )
+        .first()
+    )
+    if existing:
+        return asset_to_dict(existing)
+
+    asset_id = str(uuid.uuid4())
+    filename = f"{safe_storage_name(payload.title or default_title)}.mp4"
+    storage_key = object_key_for_asset(asset_id, kind, filename)
+    cached_project_video = None
+    if kind == "finished_video":
+        cached_project_video = (
+            db.query(Asset)
+            .filter(
+                Asset.user_id == user.id,
+                Asset.kind == "project_video",
+                Asset.remote_id == payload.taskId,
+                Asset.node_id == payload.nodeId,
+            )
+            .first()
+        )
+
+    if cached_project_video:
+        cached_path = storage.ensure_local(cached_project_video.storage_key)
+        stored = storage.save_file(storage_key, cached_path)
+        mime_type = cached_project_video.mime_type
+        provider = cached_project_video.provider
+    else:
+        content, mime_type, provider = await _download_finished_video(payload.taskId)
+        stored = storage.save_bytes(storage_key, content)
+
+    asset = Asset(
+        id=asset_id,
+        user_id=user.id,
+        flow_id=payload.flowId,
+        node_id=payload.nodeId,
+        kind=kind,
+        title=payload.title or default_title,
+        mime_type=mime_type,
+        storage_key=stored.storage_key,
+        public_url=stored.public_url,
+        size_bytes=stored.size,
+        provider=provider,
+        remote_id=payload.taskId,
+        asset_metadata={
+            **payload.metadata,
+            "ratio": payload.ratio,
+            "resolution": payload.resolution,
+            "seconds": payload.seconds,
+        },
+    )
+    db.add(asset)
+    db.commit()
+    db.refresh(asset)
+    return asset_to_dict(asset)
 
 
 @router.get("/", response_model=list[AssetOut])
@@ -186,50 +268,28 @@ async def create_finished_video_asset(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    _ensure_flow_owner(db, payload.flowId, user)
-
-    existing = (
-        db.query(Asset)
-        .filter(
-            Asset.user_id == user.id,
-            Asset.kind == "finished_video",
-            Asset.remote_id == payload.taskId,
-            Asset.node_id == payload.nodeId,
-        )
-        .first()
-    )
-    if existing:
-        return asset_to_dict(existing)
-
-    content, mime_type, provider = await _download_finished_video(payload.taskId)
-    asset_id = str(uuid.uuid4())
-    filename = f"{safe_storage_name(payload.title or 'generated-video')}.mp4"
-    storage_key = object_key_for_asset(asset_id, "finished_video", filename)
-    stored = storage.save_bytes(storage_key, content)
-    asset = Asset(
-        id=asset_id,
-        user_id=user.id,
-        flow_id=payload.flowId,
-        node_id=payload.nodeId,
+    return await _create_video_record(
+        payload,
         kind="finished_video",
-        title=payload.title or "生成成片",
-        mime_type=mime_type,
-        storage_key=stored.storage_key,
-        public_url=stored.public_url,
-        size_bytes=stored.size,
-        provider=provider,
-        remote_id=payload.taskId,
-        asset_metadata={
-            **payload.metadata,
-            "ratio": payload.ratio,
-            "resolution": payload.resolution,
-            "seconds": payload.seconds,
-        },
+        default_title="生成成片",
+        db=db,
+        user=user,
     )
-    db.add(asset)
-    db.commit()
-    db.refresh(asset)
-    return asset_to_dict(asset)
+
+
+@router.post("/project-video/from-generation", response_model=AssetOut, status_code=201)
+async def cache_project_video(
+    payload: ProjectVideoCacheCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return await _create_video_record(
+        payload,
+        kind="project_video",
+        default_title="项目生成视频",
+        db=db,
+        user=user,
+    )
 
 
 @router.post("/upload", response_model=AssetOut, status_code=201)

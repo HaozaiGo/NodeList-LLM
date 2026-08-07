@@ -32,6 +32,7 @@ TOKENOPS_VIDEO_MODEL = os.getenv(
     "TOKENOPS_VIDEO_MODEL",
     "doubao-seed-2-0-pro-260215",
 )
+VIDEO_SPEC_MODEL = os.getenv("VIDEO_SPEC_MODEL", os.getenv("TEXT_POLISH_MODEL", "doubao-seed-2-0-pro-260215")).strip()
 TOKENOPS_VIDEO_ANALYSIS_MODE = os.getenv("TOKENOPS_VIDEO_ANALYSIS_MODE", "gemini").strip().lower()
 TOKENOPS_GEMINI_MODEL = os.getenv("TOKENOPS_GEMINI_MODEL", "gemini-2.5-flash").strip()
 TOKENOPS_GENERATION_MODEL = os.getenv("TOKENOPS_GENERATION_MODEL", "doubao-seedance-1-5-pro-251215").strip()
@@ -121,6 +122,28 @@ class VideoGenerateRequest(BaseModel):
     reference_images: list[str] = Field(default_factory=list)
 
 
+class VideoSpecParams(BaseModel):
+    ratio: str = "9:16"
+    resolution: str = "720p"
+    seconds: int = 8
+    generate_audio: bool = True
+    camerafixed: bool = False
+
+
+class VideoSpecContextItem(BaseModel):
+    label: str = ""
+    text: str = ""
+
+
+class VideoSpecRequest(BaseModel):
+    user_prompt: str = ""
+    model: str = TOKENOPS_GENERATION_MODEL
+    params: VideoSpecParams = Field(default_factory=VideoSpecParams)
+    scripts: list[VideoSpecContextItem] = Field(default_factory=list)
+    summaries: list[VideoSpecContextItem] = Field(default_factory=list)
+    reference_image_count: int = 0
+
+
 def _video_model_options() -> list[dict[str, str]]:
     options: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -156,11 +179,206 @@ def _is_tokenops_video_model(model: str) -> bool:
     return model == TOKENOPS_SEEDANCE_15_MODEL
 
 
+def _tokenops_video_reference_limit(model: str) -> int:
+    if model == TOKENOPS_SEEDANCE_15_MODEL:
+        return 2
+    return 4
+
+
+def _tokenops_video_reference_role(model: str, index: int) -> str:
+    if model == TOKENOPS_SEEDANCE_15_MODEL:
+        return "first_frame" if index == 0 else "last_frame"
+    return "reference_image"
+
+
 def _tokenops_key() -> str:
     key = os.getenv("TOKENOPS_API_KEY", "").strip()
     if not key:
         raise HTTPException(status_code=500, detail="TOKENOPS_API_KEY is not configured")
     return key
+
+
+def _compact_text(text: str, limit: int) -> str:
+    normalized = re.sub(r"\s+", " ", text).strip()
+    return f"{normalized[:limit]}..." if len(normalized) > limit else normalized
+
+
+def _requested_shots(prompt: str) -> list[int]:
+    values: list[int] = []
+    for match in re.finditer(r"(?:第\s*)?(\d{1,2})(?:\s*[、,，和至到-]\s*(\d{1,2}))?\s*(?:个)?(?:分镜|镜头|镜|片段|脚本|段)", prompt):
+        start = int(match.group(1))
+        end = int(match.group(2)) if match.group(2) else start
+        if start <= end and end - start <= 12:
+            values.extend(range(start, end + 1))
+        else:
+            values.append(start)
+    if not values:
+        prefix = re.split(r"\n|视频参数：", prompt, maxsplit=1)[0]
+        values = [int(item) for item in re.findall(r"\d{1,2}", prefix) if 0 < int(item) <= 99]
+    deduped: list[int] = []
+    for value in values:
+        if value not in deduped and 0 < value <= 99:
+            deduped.append(value)
+    return deduped[:8]
+
+
+def _script_rows_for_shots(script: str, shots: list[int]) -> str:
+    if not shots:
+        return ""
+    wanted = {str(value) for value in shots}
+    rows: list[str] = []
+    for raw_line in script.splitlines():
+        line = raw_line.strip()
+        match = re.match(r"^\|?\s*(\d{1,2})\s*\|", line)
+        if match and match.group(1) in wanted:
+            rows.append(line)
+    return "\n".join(rows)
+
+
+def _fallback_video_spec(body: VideoSpecRequest) -> dict[str, Any]:
+    user_prompt = body.user_prompt.strip() or "基于上游素材生成一段短视频"
+    target_shots = _requested_shots(user_prompt)
+    selected_rows = "\n".join(
+        row
+        for item in body.scripts
+        if (row := _script_rows_for_shots(item.text, target_shots))
+    )
+    if not selected_rows:
+        selected_rows = "\n".join(
+            f"{item.label}：{_compact_text(item.text, 180)}"
+            for item in body.summaries[:3]
+            if item.text.strip()
+        )
+    is_bds = body.model == BDS_PRO_MODEL
+    shot_label = "、".join(f"S{value:02d}" for value in target_shots) if target_shots else "自动"
+    generation_prompt = "\n".join(
+        item
+        for item in [
+            _compact_text(user_prompt, 180),
+            (
+                f"生成一个连续单镜头图生视频，不要生成整部剧，不要拆成多镜头。画幅 {body.params.ratio}，"
+                f"时长 {body.params.seconds}s，分辨率 {body.params.resolution}。"
+                if is_bds
+                else f"生成对应短视频片段。画幅 {body.params.ratio}，时长 {body.params.seconds}s，分辨率 {body.params.resolution}。"
+            ),
+            f"参考分镜：{_compact_text(selected_rows, 620)}" if selected_rows else "",
+            f"参考图片：使用已附加的 {body.reference_image_count} 张上游图片。" if body.reference_image_count else "",
+            "主体清晰，动作自然，镜头运动轻微，商业短视频质感，不要文字、水印、Logo。",
+        ]
+        if item
+    )
+    return {
+        "model": body.model,
+        "target_shots": target_shots,
+        "intent_summary": _compact_text(user_prompt, 80),
+        "selected_script": selected_rows,
+        "generation_prompt": generation_prompt,
+        "negative_prompt": "blurry, out of focus, bad anatomy, extra limbs, duplicate person, watermark, text, logo",
+        "items": [
+            f"目标分镜：{shot_label}",
+            f"参考图片：{body.reference_image_count}张",
+            f"{body.params.seconds}s / {body.params.ratio} · {body.params.resolution}",
+        ],
+        "fallback": True,
+    }
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    cleaned = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    candidates = [cleaned]
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(cleaned[start:end + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            continue
+    return {}
+
+
+async def _llm_video_spec(body: VideoSpecRequest) -> dict[str, Any]:
+    key = _tokenops_key()
+    fallback = _fallback_video_spec(body)
+    scripts = "\n\n".join(
+        f"{item.label}:\n{_compact_text(item.text, 1800)}"
+        for item in body.scripts[:3]
+        if item.text.strip()
+    )
+    summaries = "\n".join(
+        f"{item.label}: {_compact_text(item.text, 360)}"
+        for item in body.summaries[:6]
+        if item.text.strip()
+    )
+    system_prompt = (
+        "你是视频生成意图解析器。根据用户输入和上游节点内容，输出严格 JSON，不要 Markdown。"
+        "你必须把用户意图转成可直接发给视频生成模型的单段 generation_prompt。"
+        "如果用户指定第几段/第几镜头/第几分镜，只抽取对应分镜，不要引用整部剧本。"
+        "Bds Pro 必须输出单镜头图生视频提示词；Seedance/Lovart/Kling/Veo 可输出短片段提示词。"
+        "JSON 字段：model, target_shots(number[]), intent_summary, selected_script, generation_prompt, negative_prompt, items(string[])."
+    )
+    user_content = {
+        "user_prompt": body.user_prompt,
+        "target_model": body.model,
+        "params": body.params.model_dump(),
+        "reference_image_count": body.reference_image_count,
+        "fallback_target_shots": fallback["target_shots"],
+        "fallback_selected_script": fallback["selected_script"],
+        "upstream_scripts": scripts,
+        "upstream_summaries": summaries,
+    }
+    payload = {
+        "model": VIDEO_SPEC_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_content, ensure_ascii=False)},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 1400,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=20)) as client:
+            response = await client.post(
+                f"{TOKENOPS_BASE_URL}/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json=payload,
+            )
+        if response.status_code >= 400:
+            return fallback
+        result = response.json()
+        choices = result.get("choices") if isinstance(result, dict) else []
+        message = choices[0].get("message", {}) if choices else {}
+        content = str(message.get("content") or "")
+        parsed = _extract_json_object(content)
+    except (httpx.HTTPError, ValueError, KeyError, IndexError):
+        return fallback
+
+    generation_prompt = str(parsed.get("generation_prompt") or "").strip()
+    if not generation_prompt:
+        return fallback
+    target_shots = parsed.get("target_shots") if isinstance(parsed.get("target_shots"), list) else fallback["target_shots"]
+    items = parsed.get("items") if isinstance(parsed.get("items"), list) else fallback["items"]
+    return {
+        **fallback,
+        "model": body.model,
+        "target_shots": [int(value) for value in target_shots if isinstance(value, (int, float, str)) and str(value).isdigit()][:8],
+        "intent_summary": _compact_text(str(parsed.get("intent_summary") or fallback["intent_summary"]), 120),
+        "selected_script": str(parsed.get("selected_script") or fallback["selected_script"]),
+        "generation_prompt": generation_prompt,
+        "negative_prompt": str(parsed.get("negative_prompt") or fallback["negative_prompt"]),
+        "items": [str(item)[:80] for item in items[:4] if str(item).strip()] or fallback["items"],
+        "fallback": False,
+    }
+
+
+@router.post("/spec")
+async def create_video_generation_spec(
+    body: VideoSpecRequest,
+    _: User = Depends(get_current_user),
+):
+    return await _llm_video_spec(body)
 
 
 def _asset_from_reference(db: Session, user: User, reference: str) -> Optional[Asset]:
@@ -172,6 +390,13 @@ def _asset_from_reference(db: Session, user: User, reference: str) -> Optional[A
     if not asset or asset.user_id != user.id:
         return None
     return asset
+
+
+def _asset_public_source_url(asset: Asset) -> str:
+    metadata = asset.metadata if isinstance(asset.metadata, dict) else {}
+    source_url = str(metadata.get("sourceUrl") or metadata.get("source_url") or "").strip()
+    parsed = urlparse(source_url)
+    return source_url if parsed.scheme in {"http", "https"} and parsed.netloc else ""
 
 
 def _resolve_lovart_reference_images(db: Session, user: User, references: list[str]) -> list[str]:
@@ -188,6 +413,29 @@ def _resolve_lovart_reference_images(db: Session, user: User, references: list[s
             continue
         resolved.append(value)
     return resolved
+
+
+async def _resolve_tokenops_reference_image(db: Session, user: User, reference: str) -> str:
+    value = reference.strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="参考图片为空")
+    if value.startswith("data:image/"):
+        return value
+    if value.startswith("blob:"):
+        raise HTTPException(status_code=400, detail="图片还在本地预览中，请等待上传完成后再生成视频")
+
+    asset = _asset_from_reference(db, user, value)
+    if asset:
+        public_source_url = _asset_public_source_url(asset)
+        if public_source_url:
+            return public_source_url
+    if asset and storage.is_remote:
+        return storage.presign_download(asset.storage_key, asset.title)
+    if asset:
+        image_data_url, _ = await _image_reference_to_data_url(db, user, value)
+        return image_data_url
+
+    return value
 
 
 async def _image_reference_to_data_url(db: Session, user: User, reference: str) -> tuple[str, str]:
@@ -334,6 +582,44 @@ def _normalize_bds_status(value: Any) -> str:
     return "running"
 
 
+def _bds_error_detail(data: dict[str, Any]) -> str:
+    raw_error = data.get("error") or data.get("message") or data.get("detail")
+    parsed = raw_error
+    if isinstance(raw_error, str):
+        try:
+            parsed = json.loads(raw_error)
+        except json.JSONDecodeError:
+            parsed = raw_error
+
+    def find_key(value: Any, keys: set[str]) -> str:
+        if isinstance(value, dict):
+            for key in keys:
+                item = value.get(key)
+                if isinstance(item, str) and item.strip() and not item.strip().startswith(("{", "[")):
+                    return item.strip()
+            for item in value.values():
+                text = find_key(item, keys)
+                if text:
+                    return text
+        if isinstance(value, list):
+            for item in value:
+                text = find_key(item, keys)
+                if text:
+                    return text
+        return ""
+
+    detail = find_key(parsed, {"exception_message", "exception", "error_message"})
+    if not detail:
+        detail = find_key(parsed, {"message", "detail"})
+    if detail:
+        return detail
+    if isinstance(raw_error, str) and raw_error.strip() and not raw_error.strip().startswith(("{", "[")):
+        return raw_error.strip()
+    if status := data.get("status"):
+        return f"Bds Pro 返回状态：{status}"
+    return "Bds Pro 生成失败，未返回详细错误"
+
+
 def _absolute_bds_url(value: str) -> str:
     if value.startswith("http://") or value.startswith("https://"):
         return value
@@ -409,15 +695,24 @@ async def _get_bds_status(video_id: str) -> dict[str, Any]:
         data = {}
     status = _normalize_bds_status(data.get("state") or data.get("status"))
     result: dict[str, Any] = {}
+    video_urls: list[str] = []
     if status == "completed":
         result = await _get_bds_result(task_id)
+        video_urls = _extract_video_urls(result)
+        if not video_urls:
+            status = "failed"
+    error = _bds_error_detail(data) if status == "failed" else ""
+    if status == "failed" and result and not error:
+        error = _bds_error_detail(result)
     return {
         **data,
         "id": f"{BDS_PRO_MODEL}:{task_id}",
         "model": BDS_PRO_MODEL,
         "status": status,
+        "error": error,
         "result": result,
-        "content_path": f"/api/video/generate/{BDS_PRO_MODEL}:{task_id}/content" if status == "completed" else "",
+        "videoUrls": video_urls,
+        "content_path": f"/api/video/generate/{BDS_PRO_MODEL}:{task_id}/content" if status == "completed" and video_urls else "",
     }
 
 
@@ -425,7 +720,8 @@ async def _download_bds_video(video_id: str) -> tuple[bytes, str]:
     task_id = _bds_task_id(video_id)
     result = await _get_bds_result(task_id)
     output = result.get("output") if isinstance(result.get("output"), dict) else {}
-    url = str(output.get("url") or result.get("url") or "").strip()
+    urls = _extract_video_urls(result)
+    url = str(output.get("url") or result.get("url") or (urls[0] if urls else "")).strip()
     if not url:
         raise HTTPException(status_code=404, detail="Bds Pro 结果未返回视频 URL")
     try:
@@ -1337,7 +1633,10 @@ def _validate_generation_request(payload: VideoGenerateRequest) -> None:
     if payload.resolution not in SEEDANCE_RESOLUTIONS:
         raise HTTPException(status_code=400, detail="不支持的视频分辨率")
     if payload.seconds not in SEEDANCE_SECONDS:
-        raise HTTPException(status_code=400, detail="Seedance 1.5 Pro 时长需在 4-15 秒之间")
+        raise HTTPException(status_code=400, detail="Seedance 视频时长需在 4-15 秒之间")
+    model = _select_generation_model(payload)
+    if model == TOKENOPS_SEEDANCE_15_MODEL and payload.seconds > 12:
+        raise HTTPException(status_code=400, detail="Seedance 1.5 Pro 时长需在 4-12 秒之间")
 
 
 @router.get("/models")
@@ -1361,15 +1660,16 @@ async def generate_video(
     key = _tokenops_key()
     content: list[dict[str, Any]] = [{"type": "text", "text": payload.prompt.strip()}]
     reference_count = 0
-    for reference in [item for item in payload.reference_images if item.strip()][:4]:
-        image_data_url, _ = await _image_reference_to_data_url(db, user, reference)
+    max_reference_count = _tokenops_video_reference_limit(model)
+    for index, reference in enumerate([item for item in payload.reference_images if item.strip()][:max_reference_count]):
+        image_url = await _resolve_tokenops_reference_image(db, user, reference)
         content.append(
             {
                 "type": "image_url",
                 "image_url": {
-                    "url": image_data_url,
-                    "detail": "high",
+                    "url": image_url,
                 },
+                "role": _tokenops_video_reference_role(model, index),
             }
         )
         reference_count += 1
@@ -1387,7 +1687,7 @@ async def generate_video(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=20)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20)) as client:
             response = await client.post(
                 f"{TOKENOPS_BASE_URL}/v1/videos",
                 headers={
@@ -1402,7 +1702,8 @@ async def generate_video(
         raise HTTPException(status_code=502, detail=f"TokenOps 视频生成请求失败：{exc}") from exc
 
     if response.status_code >= 400:
-        raise HTTPException(status_code=502, detail=_remote_error(response, "TokenOps video generation failed"))
+        detail = _remote_error(response, "TokenOps video generation failed")
+        raise HTTPException(status_code=502, detail=f"TokenOps 视频生成创建失败（HTTP {response.status_code}）：{detail}")
 
     result = response.json()
     return {
