@@ -12,7 +12,11 @@ then "openai/gpt-4o-mini".
 """
 
 import os
-from langchain_community.chat_models import ChatLiteLLM
+
+try:
+    from langchain_litellm import ChatLiteLLM
+except ImportError:  # Backward compatibility for older LangChain installs.
+    from langchain_community.chat_models import ChatLiteLLM
 
 DEFAULT_MODEL = os.getenv("NODELIST_DEFAULT_MODEL", "openai/gpt-4o-mini")
 

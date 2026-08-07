@@ -56,6 +56,7 @@ def _own_flow(flow_id: str, user: User, db: Session) -> Flow:
     return flow
 
 
+@router.get("", response_model=list[FlowOut], include_in_schema=False)
 @router.get("/", response_model=list[FlowOut])
 def list_flows(
     db: Session = Depends(get_db),
@@ -64,6 +65,7 @@ def list_flows(
     return db.query(Flow).filter(Flow.user_id == user.id).order_by(Flow.updated_at.desc(), Flow.created_at.desc()).all()
 
 
+@router.post("", response_model=FlowOut, status_code=201, include_in_schema=False)
 @router.post("/", response_model=FlowOut, status_code=201)
 def create_flow(
     body: FlowCreate,

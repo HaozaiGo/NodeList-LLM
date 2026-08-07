@@ -14,6 +14,7 @@ langchain
 langchain-core
 langchain-openai
 langchain-community
+langchain-litellm
 langgraph
 httpx
 python-multipart==0.0.20
