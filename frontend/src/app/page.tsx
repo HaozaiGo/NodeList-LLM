@@ -1172,9 +1172,16 @@ function AssetPanel({
   );
 }
 
-function FloatingTools({ assetPanelCollapsed }: { assetPanelCollapsed: boolean }) {
+function FloatingTools({
+  assetPanelCollapsed,
+  onOpenAddMenu,
+}: {
+  assetPanelCollapsed: boolean;
+  onOpenAddMenu: (event: ReactMouseEvent<HTMLButtonElement>, flowPosition: XYPosition) => void;
+}) {
+  const { screenToFlowPosition } = useReactFlow();
   const tools = [
-    { icon: Plus, active: true },
+    { icon: Plus, active: true, label: "添加素材" },
     { icon: MousePointer2 },
     { icon: Layers3 },
     { icon: Search },
@@ -1189,10 +1196,24 @@ function FloatingTools({ assetPanelCollapsed }: { assetPanelCollapsed: boolean }
       {tools.map(({ icon: Icon, active }, index) => (
         <button
           key={index}
+          type="button"
           className={cn(
             "flex size-8 items-center justify-center rounded-full",
             active ? "bg-fuchsia-500 text-white" : "bg-white/[0.06] text-zinc-400"
           )}
+          onClick={(event) => {
+            if (index !== 0) return;
+            event.stopPropagation();
+            const rect = event.currentTarget.getBoundingClientRect();
+            onOpenAddMenu(
+              event,
+              screenToFlowPosition({
+                x: rect.left + rect.width / 2,
+                y: rect.top + rect.height / 2,
+              })
+            );
+          }}
+          aria-label={index === 0 ? "添加素材" : undefined}
         >
           <Icon className="size-4" />
         </button>
@@ -2020,7 +2041,7 @@ function Composer({
 function StudioShell() {
   const [assetMenu, setAssetMenu] = useState<AssetContextMenuState | null>(null);
   const [nextStepMenu, setNextStepMenu] = useState<NextStepMenuState | null>(null);
-  const [assetPanelCollapsed, setAssetPanelCollapsed] = useState(false);
+  const [assetPanelCollapsed, setAssetPanelCollapsed] = useState(true);
   const [agentCollapsed, setAgentCollapsed] = useState(false);
   const [imageModels, setImageModels] = useState<ImageModelOption[]>(fallbackImageModels);
   const [videoModels, setVideoModels] = useState<VideoModelOption[]>(fallbackVideoModels);
@@ -2085,6 +2106,7 @@ function StudioShell() {
       selectedNode.data.label.includes("文本生成") ||
       selectedNode.data.label.includes("剧本生成"));
   const hasSelectedNode = Boolean(selectedNodeId);
+  const shouldShowComposer = Boolean(selectedNodeId && selectedNode?.type !== "videoStitcher");
   const selectedComposerPrompt = useMemo(() => {
     if (!selectedNode) return "";
     const config = selectedNode.data.config;
@@ -2216,8 +2238,8 @@ function StudioShell() {
   }, []);
 
   useEffect(() => {
-    if (!hasSelectedNode) setAgentCollapsed(false);
-  }, [hasSelectedNode]);
+    if (!shouldShowComposer) setAgentCollapsed(false);
+  }, [shouldShowComposer]);
 
   useEffect(() => {
     if (!isImageGenerationNode) return;
@@ -2257,6 +2279,21 @@ function StudioShell() {
       screenPosition: {
         x: Math.min(event.clientX, window.innerWidth - menuWidth - gutter),
         y: Math.min(event.clientY, window.innerHeight - menuHeight - gutter),
+      },
+      flowPosition,
+    });
+  };
+
+  const handleFloatingAddMenu = (event: ReactMouseEvent<HTMLButtonElement>, flowPosition: XYPosition) => {
+    const menuWidth = 246;
+    const menuHeight = 256;
+    const gutter = 16;
+    const rect = event.currentTarget.getBoundingClientRect();
+    closeNextStepMenu();
+    setAssetMenu({
+      screenPosition: {
+        x: Math.max(gutter, Math.min(rect.left - menuWidth - 14, window.innerWidth - menuWidth - gutter)),
+        y: Math.max(gutter, Math.min(rect.top - 12, window.innerHeight - menuHeight - gutter)),
       },
       flowPosition,
     });
@@ -2615,7 +2652,10 @@ function StudioShell() {
           selectedImageModel={selectedImageModel}
           selectedVideoModel={selectedVideoModel}
         />
-        <FloatingTools assetPanelCollapsed={assetPanelCollapsed} />
+        <FloatingTools
+          assetPanelCollapsed={assetPanelCollapsed}
+          onOpenAddMenu={handleFloatingAddMenu}
+        />
         {assetMenu && (
           <AddAssetMenu
             position={assetMenu.screenPosition}
@@ -2630,7 +2670,7 @@ function StudioShell() {
             onPick={handlePickNextStep}
           />
         )}
-        {hasSelectedNode && (
+        {shouldShowComposer && (
           <Composer
             collapsed={agentCollapsed}
             onPickVideo={() => openVideoPicker()}

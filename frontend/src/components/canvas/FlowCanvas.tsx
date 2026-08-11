@@ -66,6 +66,19 @@ function collectUpstreamEdgeIds(edges: Edge[], selectedNodeId: string | null) {
   return upstreamEdgeIds;
 }
 
+function isEditableShortcutTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  const tagName = target.tagName.toLowerCase();
+  return (
+    tagName === "input" ||
+    tagName === "textarea" ||
+    tagName === "select" ||
+    target.isContentEditable ||
+    target.closest("[contenteditable='true']") !== null ||
+    target.closest("[role='textbox']") !== null
+  );
+}
+
 export function FlowCanvas({
   onPaneContextMenu,
   onPaneClick,
@@ -75,7 +88,16 @@ export function FlowCanvas({
   onPaneClick?: ReactFlowProps["onPaneClick"];
   onLooseConnectEnd?: LooseConnectHandler;
 }) {
-  const { nodes, edges, onNodesChange, onEdgesChange, onConnect, addNode } = useFlowStore();
+  const {
+    nodes,
+    edges,
+    onNodesChange,
+    onEdgesChange,
+    onConnect,
+    addNode,
+    copySelection,
+    pasteCopiedSelection,
+  } = useFlowStore();
   const { screenToFlowPosition } = useReactFlow();
   const connectionStartRef = useRef<{ nodeId: string | null; handleId: string | null } | null>(null);
   const selectedNodeId = useMemo(() => nodes.find((node) => node.selected)?.id ?? null, [nodes]);
@@ -223,6 +245,26 @@ export function FlowCanvas({
       document.removeEventListener("touchend", handleDocumentTouchEnd);
     };
   }, [emitLooseConnectEnd]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (isEditableShortcutTarget(event.target)) return;
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+
+      const key = event.key.toLowerCase();
+      if (key === "c") {
+        if (copySelection()) event.preventDefault();
+        return;
+      }
+
+      if (key === "v") {
+        if (pasteCopiedSelection()) event.preventDefault();
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [copySelection, pasteCopiedSelection]);
 
   return (
     <div className="h-full flex-1">

@@ -43,6 +43,8 @@ interface FlowState {
   onEdgesChange: OnEdgesChange;
   onConnect: OnConnect;
   addNode: (node: Node<NodeData>) => void;
+  copySelection: () => boolean;
+  pasteCopiedSelection: () => boolean;
   updateNodeConfig: (id: string, config: Record<string, unknown>) => void;
   updateNodeData: (id: string, data: Partial<NodeData>) => void;
   addVideoUploadNode: (fileName: string, position: XYPosition, videoUrl?: string, file?: File) => void;
@@ -85,6 +87,8 @@ let stitcherNodeCounter = 1;
 const activeVideoGenerationKeys = new Set<string>();
 const activeVideoRecoveryNodeIds = new Set<string>();
 const doubaoProgressTimers = new Map<string, ReturnType<typeof setInterval>>();
+let selectionClipboard: { nodes: Node<NodeData>[]; edges: Edge[] } | null = null;
+let selectionPasteCount = 0;
 const videoFileDbName = "nodelist-video-files";
 const videoFileStoreName = "videos";
 
@@ -544,6 +548,19 @@ function curvedEdges(edges: Edge[]) {
   return edges.map((edge) => ({ ...edge, type: "default" }));
 }
 
+function cloneFlowValue<T>(value: T): T {
+  if (typeof structuredClone === "function") return structuredClone(value);
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function copiedNodeId(nodeId: string, pasteStamp: string, index: number) {
+  return `${nodeId}-copy-${pasteStamp}-${index}`;
+}
+
+function copiedEdgeId(edge: Edge, pasteStamp: string, index: number) {
+  return `${edge.id || "edge"}-copy-${pasteStamp}-${index}`;
+}
+
 function findDoubaoTargetId(nodes: Node<NodeData>[], edges: Edge[], sourceNodeId: string) {
   const existingEdge = edges.find((edge) => {
     if (edge.source !== sourceNodeId) return false;
@@ -795,6 +812,73 @@ export const useFlowStore = create<FlowState>((set, get) => ({
   addNode: (node) => {
     set({ nodes: [...get().nodes, node] });
     scheduleAutoSave(get);
+  },
+  copySelection: () => {
+    const selectedNodeIds = new Set(get().nodes.filter((node) => node.selected).map((node) => node.id));
+    if (selectedNodeIds.size === 0) return false;
+
+    selectionClipboard = {
+      nodes: get().nodes.filter((node) => selectedNodeIds.has(node.id)).map((node) => cloneFlowValue(node)),
+      edges: get().edges
+        .filter((edge) => selectedNodeIds.has(edge.source) || selectedNodeIds.has(edge.target))
+        .map((edge) => cloneFlowValue(edge)),
+    };
+    selectionPasteCount = 0;
+    return true;
+  },
+  pasteCopiedSelection: () => {
+    if (!selectionClipboard || selectionClipboard.nodes.length === 0) return false;
+
+    selectionPasteCount += 1;
+    const pasteStamp = `${Date.now()}-${selectionPasteCount}`;
+    const offset = 48 * selectionPasteCount;
+    const idMap = new Map<string, string>();
+    selectionClipboard.nodes.forEach((node, index) => {
+      idMap.set(node.id, copiedNodeId(node.id, pasteStamp, index + 1));
+    });
+
+    const nextVideoFiles = { ...get().videoFiles };
+    const pastedNodes = selectionClipboard.nodes.map((node) => {
+      const nextId = idMap.get(node.id) ?? copiedNodeId(node.id, pasteStamp, 0);
+      const file = get().videoFiles[node.id];
+      if (file) {
+        nextVideoFiles[nextId] = file;
+        void storeVideoFile(nextId, file);
+      }
+
+      return {
+        ...cloneFlowValue(node),
+        id: nextId,
+        selected: true,
+        position: {
+          x: node.position.x + offset,
+          y: node.position.y + offset,
+        },
+      };
+    });
+
+    const pastedEdges = selectionClipboard.edges.map((edge, index) => {
+      const nextSource = idMap.get(edge.source) ?? edge.source;
+      const nextTarget = idMap.get(edge.target) ?? edge.target;
+      return {
+        ...cloneFlowValue(edge),
+        id: copiedEdgeId(edge, pasteStamp, index + 1),
+        source: nextSource,
+        target: nextTarget,
+        selected: false,
+      };
+    });
+
+    set({
+      nodes: [
+        ...get().nodes.map((node) => ({ ...node, selected: false })),
+        ...pastedNodes,
+      ],
+      edges: curvedEdges([...get().edges, ...pastedEdges]),
+      videoFiles: nextVideoFiles,
+    });
+    scheduleAutoSave(get);
+    return true;
   },
   updateNodeConfig: (id, config) => {
     set({
