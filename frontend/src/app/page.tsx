@@ -18,8 +18,8 @@ import {
   Layers3,
   Link2,
   LogOut,
+  Map as MapIcon,
   Monitor,
-  MousePointer2,
   PackageCheck,
   Play,
   Plus,
@@ -43,18 +43,20 @@ import {
   downloadGeneratedVideo,
   listAssets,
   listImageModels,
+  listTextModels,
   listVideoModels,
   resolveMediaUrl,
   uploadAsset,
   type AssetRecord,
   type ImageModelOption,
+  type TextModelOption,
   type VideoGenerationSpec,
   type VideoModelOption,
 } from "@/lib/api";
 import { useAuthStore } from "@/stores/authStore";
 import { useFlowStore } from "@/stores/flowStore";
 import type { ImageAssetItem, ImageAssetTag, NodeData, StudioNodeStatus } from "@/types/flow";
-import { useReactFlow, type XYPosition } from "@xyflow/react";
+import { useReactFlow, useViewport, type XYPosition } from "@xyflow/react";
 
 const statusText: Record<StudioNodeStatus, string> = {
   idle: "Idle",
@@ -92,6 +94,8 @@ const fallbackImageModels: ImageModelOption[] = [
 
 const fallbackVideoModels: VideoModelOption[] = [
   { model: "bds-pro", label: "Bds Pro" },
+  { model: "wan2.2-i2v-spicy", label: "Wan 2.2" },
+  { model: "wan2.7-i2v-spicy", label: "Wan 2.7" },
   { model: "doubao-seedance-1-5-pro-251215", label: "Seedance 1.5 Pro" },
   { model: "seedance-2-0", label: "Seedance 2.0" },
   { model: "seedance-2-0-fast", label: "Seedance 2.0 Fast" },
@@ -101,6 +105,11 @@ const fallbackVideoModels: VideoModelOption[] = [
   { model: "veo-3-1", label: "Veo 3.1" },
   { model: "veo-3-1-fast", label: "Veo 3.1 Fast" },
   { model: "gemini-omni-flash", label: "Gemini Omni Flash" },
+];
+
+const fallbackTextModels: TextModelOption[] = [
+  { model: "doubao-seed-2-0-pro-260215", label: "Doubao Seed 2.0 Pro" },
+  { model: "qwen3.8-max", label: "Qwen3.8-Max" },
 ];
 
 const imageModelMeta: Record<string, { description: string; chip: string }> = {
@@ -116,6 +125,8 @@ const imageModelMeta: Record<string, { description: string; chip: string }> = {
 
 const videoModelMeta: Record<string, { description: string; chip: string }> = {
   "bds-pro": { description: "最多2图：首帧+人物脸参考。适合单主体图生视频，不适合6图综合参考。", chip: "60s" },
+  "wan2.2-i2v-spicy": { description: "Wan 2.2 图生视频。使用1张首帧图，支持5s/8s与480p/720p。", chip: "60s" },
+  "wan2.7-i2v-spicy": { description: "Wan 2.7 图生视频。支持首帧或首尾帧，适合更强动作和镜头过渡。", chip: "90s" },
   "doubao-seedance-1-5-pro-251215": { description: "最多2图：首帧+尾帧控制。稳定出片，适合明确起止画面的短镜头。", chip: "60s" },
   "seedance-2-0": { description: "支持多图参考。适合人物/场景/道具多素材合成，运动和叙事均衡。", chip: "60s" },
   "seedance-2-0-fast": { description: "支持多图参考。更快出片，适合6图参考的快速预览和多轮试错。", chip: "35s" },
@@ -125,6 +136,11 @@ const videoModelMeta: Record<string, { description: string; chip: string }> = {
   "veo-3-1": { description: "支持多图参考。电影感和复杂场景更强，适合高质量成片探索。", chip: "90s" },
   "veo-3-1-fast": { description: "支持多图参考。Veo 快速模式，适合批量方向测试。", chip: "50s" },
   "gemini-omni-flash": { description: "支持多图参考。快速多模态生成与理解，适合轻量创意预览。", chip: "35s" },
+};
+
+const textModelMeta: Record<string, { description: string; chip: string }> = {
+  "doubao-seed-2-0-pro-260215": { description: "豆包脚本润色与短剧文案生成，沿用原剧本链路。", chip: "流式" },
+  "qwen3.8-max": { description: "Qwen3.8-Max 长文本剧本生成，适合复杂分镜、台词和叙事推演。", chip: "流式" },
 };
 
 function modelLabel(options: Array<{ model: string; label: string }>, model: string, fallback: string) {
@@ -163,6 +179,25 @@ const videoModes: Array<{ value: VideoGenerationMode; label: string }> = [
 const videoRatios = ["Auto", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"];
 const videoResolutions: VideoGenerationParams["resolution"][] = ["480p", "720p", "1080p", "4k"];
 const videoSeconds: VideoGenerationParams["seconds"][] = [5, 8, 10, 15];
+
+function normalizeVideoParamsForModel(model: string, params: VideoGenerationParams): VideoGenerationParams {
+  const normalized: VideoGenerationParams = {
+    ...params,
+    ratio: params.ratio === "Auto" ? "9:16" : params.ratio,
+  };
+
+  if (model === "wan2.2-i2v-spicy") {
+    normalized.resolution = params.resolution === "480p" ? "480p" : "720p";
+    normalized.seconds = params.seconds === 5 ? 5 : 8;
+  }
+
+  if (model === "wan2.7-i2v-spicy") {
+    normalized.resolution = params.resolution === "1080p" ? "1080p" : "720p";
+  }
+
+  return normalized;
+}
+
 const settingImageOptions = [
   {
     label: "角色脸部三视图",
@@ -540,12 +575,11 @@ function Pill({
 
 function TopBar() {
   const router = useRouter();
-  const { email, logout } = useAuthStore();
+  const { email } = useAuthStore();
   const { flowName, setFlowName, saving, saveError, persistFlow } = useFlowStore();
 
-  const handleLogout = () => {
-    logout();
-    router.push("/");
+  const handleBackToProjects = () => {
+    router.push("/projects");
   };
 
   return (
@@ -592,8 +626,8 @@ function TopBar() {
         </Button>
         <Button
           className="size-9 rounded-full border border-white/10 bg-white/[0.06] p-0 text-zinc-300 hover:bg-white/10"
-          onClick={handleLogout}
-          title="退出登录"
+          onClick={handleBackToProjects}
+          title="返回项目选择"
         >
           <LogOut className="size-4" />
         </Button>
@@ -608,15 +642,19 @@ function AssetPanel({
   collapsed,
   onToggle,
   imageModels,
+  textModels,
   videoModels,
   selectedImageModel,
+  selectedTextModel,
   selectedVideoModel,
 }: {
   collapsed: boolean;
   onToggle: () => void;
   imageModels: ImageModelOption[];
+  textModels: TextModelOption[];
   videoModels: VideoModelOption[];
   selectedImageModel: string;
+  selectedTextModel: string;
   selectedVideoModel: string;
 }) {
   const { screenToFlowPosition } = useReactFlow();
@@ -649,8 +687,15 @@ function AssetPanel({
       selectedData?.label.includes("Veo") ||
       selectedData?.label.includes("Gemini") ||
       selectedData?.label.includes("Bds"));
+  const selectedIsTextGeneration =
+    selectedFlowNode?.type === "storyboardScript" &&
+    (selectedConfig.mode === "referenced_text" ||
+      selectedData?.label.includes("文本生成") ||
+      selectedData?.label.includes("剧本生成"));
   const activePanelModel = selectedIsVideoGeneration
     ? selectedNodeModel || selectedVideoModel
+    : selectedIsTextGeneration
+      ? selectedNodeModel || selectedTextModel
     : selectedIsImageGeneration
       ? selectedNodeModel || selectedImageModel
       : "";
@@ -662,6 +707,14 @@ function AssetPanel({
           className: "bg-fuchsia-400/10 text-fuchsia-100",
         },
       ]
+    : selectedIsTextGeneration
+      ? [
+          {
+            label: modelLabel(textModels, activePanelModel, "剧本模型"),
+            value: textModelMeta[activePanelModel]?.description ?? "当前剧本生成节点",
+            className: "bg-violet-400/10 text-violet-100",
+          },
+        ]
     : selectedIsImageGeneration
       ? [
           {
@@ -1174,17 +1227,27 @@ function AssetPanel({
 
 function FloatingTools({
   assetPanelCollapsed,
+  miniMapVisible,
+  connectionsVisible,
+  onToggleMiniMap,
+  onToggleConnections,
   onOpenAddMenu,
 }: {
   assetPanelCollapsed: boolean;
+  miniMapVisible: boolean;
+  connectionsVisible: boolean;
+  onToggleMiniMap: () => void;
+  onToggleConnections: () => void;
   onOpenAddMenu: (event: ReactMouseEvent<HTMLButtonElement>, flowPosition: XYPosition) => void;
 }) {
   const { screenToFlowPosition } = useReactFlow();
+  const { zoom } = useViewport();
+  const zoomPercent = `${Math.round(zoom * 100)}%`;
   const tools = [
     { icon: Plus, active: true, label: "添加素材" },
-    { icon: MousePointer2 },
-    { icon: Layers3 },
-    { icon: Search },
+    { icon: MapIcon, active: miniMapVisible, label: miniMapVisible ? "隐藏画布小地图" : "显示画布小地图" },
+    { icon: Link2, active: connectionsVisible, label: connectionsVisible ? "隐藏节点连线" : "显示节点连线" },
+    { zoomLabel: zoomPercent, label: `当前缩放比例 ${zoomPercent}` },
   ];
   return (
     <div
@@ -1193,29 +1256,49 @@ function FloatingTools({
         assetPanelCollapsed ? "right-[72px]" : "right-[376px]"
       )}
     >
-      {tools.map(({ icon: Icon, active }, index) => (
+      {tools.map(({ icon: Icon, active, label, zoomLabel }, index) => (
         <button
           key={index}
           type="button"
           className={cn(
-            "flex size-8 items-center justify-center rounded-full",
-            active ? "bg-fuchsia-500 text-white" : "bg-white/[0.06] text-zinc-400"
+            "group relative flex size-8 items-center justify-center rounded-full transition",
+            index === 0
+              ? "bg-fuchsia-500 text-white hover:bg-fuchsia-400"
+              : active
+                ? "bg-white/[0.12] text-white hover:bg-white/[0.16]"
+                : "bg-white/[0.04] text-zinc-500 hover:bg-white/[0.08] hover:text-zinc-300"
           )}
           onClick={(event) => {
-            if (index !== 0) return;
             event.stopPropagation();
-            const rect = event.currentTarget.getBoundingClientRect();
+            if (index === 1) {
+              onToggleMiniMap();
+              return;
+            }
+            if (index === 2) {
+              onToggleConnections();
+              return;
+            }
+            if (index !== 0) return;
             onOpenAddMenu(
               event,
               screenToFlowPosition({
-                x: rect.left + rect.width / 2,
-                y: rect.top + rect.height / 2,
+                x: window.innerWidth / 2,
+                y: window.innerHeight / 2,
               })
             );
           }}
-          aria-label={index === 0 ? "添加素材" : undefined}
+          aria-label={label}
         >
-          <Icon className="size-4" />
+          {Icon ? (
+            <Icon className="size-4" />
+          ) : (
+            <span className="font-mono text-[10px] font-semibold leading-none tracking-[-0.02em] text-zinc-100">
+              {zoomLabel}
+            </span>
+          )}
+          <span className="pointer-events-none absolute right-full top-1/2 mr-3 -translate-y-1/2 whitespace-nowrap rounded-lg border border-white/10 bg-[#19191f]/95 px-2.5 py-1.5 text-xs font-medium text-zinc-100 opacity-0 shadow-xl backdrop-blur transition group-hover:translate-x-0 group-hover:opacity-100">
+            {label}
+          </span>
         </button>
       ))}
     </div>
@@ -1321,8 +1404,10 @@ function Composer({
   reference,
   upstreamScriptCount,
   imageModels,
+  textModels,
   videoModels,
   selectedImageModel,
+  selectedTextModel,
   selectedVideoModel,
   imageParams,
   videoParams,
@@ -1335,6 +1420,7 @@ function Composer({
   generatingText,
   onRemoveReference,
   onSelectImageModel,
+  onSelectTextModel,
   onSelectVideoModel,
   onChangeImageParams,
   onChangeVideoParams,
@@ -1347,8 +1433,10 @@ function Composer({
   reference: ComposerReference | null;
   upstreamScriptCount: number;
   imageModels: ImageModelOption[];
+  textModels: TextModelOption[];
   videoModels: VideoModelOption[];
   selectedImageModel: string;
+  selectedTextModel: string;
   selectedVideoModel: string;
   imageParams: ImageGenerationParams;
   videoParams: VideoGenerationParams;
@@ -1361,6 +1449,7 @@ function Composer({
   generatingText: boolean;
   onRemoveReference: (item: ComposerReferenceItem) => void;
   onSelectImageModel: (model: string) => void;
+  onSelectTextModel: (model: string) => void;
   onSelectVideoModel: (model: string) => void;
   onChangeImageParams: (params: ImageGenerationParams) => void;
   onChangeVideoParams: (params: VideoGenerationParams) => void;
@@ -1384,20 +1473,24 @@ function Composer({
   const imageReferenceCount = references.filter((item) => item.kind === "image").length;
   const referenceBadgeCount = references.length;
   const limitedVideoReferenceModel =
-    selectedVideoModel === "bds-pro" || selectedVideoModel === "doubao-seedance-1-5-pro-251215";
+    selectedVideoModel === "bds-pro" ||
+    selectedVideoModel === "wan2.2-i2v-spicy" ||
+    selectedVideoModel === "wan2.7-i2v-spicy" ||
+    selectedVideoModel === "doubao-seedance-1-5-pro-251215";
+  const videoReferenceLimit = selectedVideoModel === "wan2.2-i2v-spicy" ? 1 : 2;
   const videoReferenceHint =
     isVideoGenerationNode && imageReferenceCount > 0
       ? limitedVideoReferenceModel
-        ? `当前模型最多使用前2张图，${imageReferenceCount > 2 ? `其余${imageReferenceCount - 2}张会写入提示词` : "适合首尾帧/单主体"}`
+        ? `当前模型最多使用前${videoReferenceLimit}张图，${imageReferenceCount > videoReferenceLimit ? `其余${imageReferenceCount - videoReferenceLimit}张会写入提示词` : "适合首帧/首尾帧控制"}`
         : `当前模型支持多图参考，将引用${imageReferenceCount}张图片`
       : "";
   const selectedModelLabel = isVideoGenerationNode
     ? videoModels.find((item) => item.model === selectedVideoModel)?.label ?? "视频模型"
     : isTextGenerationNode
-      ? "Doubao Seed 2.0 Pro"
+      ? textModels.find((item) => item.model === selectedTextModel)?.label ?? "剧本模型"
     : imageModels.find((item) => item.model === selectedImageModel)?.label ?? "Lib Image";
-  const activeModelOptions = isVideoGenerationNode ? videoModels : imageModels;
-  const activeModelValue = isVideoGenerationNode ? selectedVideoModel : selectedImageModel;
+  const activeModelOptions = isVideoGenerationNode ? videoModels : isTextGenerationNode ? textModels : imageModels;
+  const activeModelValue = isVideoGenerationNode ? selectedVideoModel : isTextGenerationNode ? selectedTextModel : selectedImageModel;
   const paramsLabel = isTextGenerationNode
     ? "剧本 · 分镜 · 台词"
     : `${imageParams.ratio} · ${imageParams.quality} · ${imageParams.resolution} · ${imageParams.count}张`;
@@ -1424,11 +1517,13 @@ function Composer({
     onChangeImageParams({ ...imageParams, ...patch });
   };
   const updateVideoParams = (patch: Partial<VideoGenerationParams>) => {
-    onChangeVideoParams({ ...videoParams, ...patch });
+    onChangeVideoParams(normalizeVideoParamsForModel(selectedVideoModel, { ...videoParams, ...patch }));
   };
   const selectModel = (model: string) => {
     if (isVideoGenerationNode) {
       onSelectVideoModel(model);
+    } else if (isTextGenerationNode) {
+      onSelectTextModel(model);
     } else if (isImageGenerationNode) {
       onSelectImageModel(model);
     }
@@ -1594,7 +1689,7 @@ function Composer({
                 modelOpen && "bg-white/[0.08]"
               )}
               onClick={() => {
-                if (!isImageGenerationNode && !isVideoGenerationNode) return;
+                if (!isImageGenerationNode && !isVideoGenerationNode && !isTextGenerationNode) return;
                 setParamsOpen(false);
                 setPresetOpen(false);
                 setModelOpen((value) => !value);
@@ -1603,7 +1698,7 @@ function Composer({
             >
               <Link2 className="size-4 shrink-0 text-zinc-100" />
               <span className="truncate">{selectedModelLabel}</span>
-              {(isImageGenerationNode || isVideoGenerationNode) && (
+              {(isImageGenerationNode || isVideoGenerationNode || isTextGenerationNode) && (
                 modelOpen ? (
                   <ChevronUp className="size-3.5 shrink-0 text-zinc-400" />
                 ) : (
@@ -1611,15 +1706,17 @@ function Composer({
                 )
               )}
             </button>
-            {modelOpen && (isImageGenerationNode || isVideoGenerationNode) && (
+            {modelOpen && (isImageGenerationNode || isVideoGenerationNode || isTextGenerationNode) && (
               <div className="nodrag nopan absolute bottom-10 left-0 z-30 w-[430px] overflow-hidden rounded-2xl border border-white/12 bg-[#242424]/98 p-2 text-zinc-100 shadow-[0_22px_60px_rgba(0,0,0,0.52)] backdrop-blur">
                 <div className="max-h-[360px] space-y-1 overflow-y-auto pr-1">
                   {activeModelOptions.map((option) => {
                     const selected = option.model === activeModelValue;
                     const meta = isVideoGenerationNode
                       ? videoModelMeta[option.model] ?? { description: "视频生成模型", chip: "60s" }
+                      : isTextGenerationNode
+                        ? textModelMeta[option.model] ?? { description: "剧本生成模型", chip: "流式" }
                       : imageModelMeta[option.model] ?? { description: "图片生成模型", chip: "50s" };
-                    const OptionIcon = isVideoGenerationNode ? Film : option.model.includes("seedream") ? Film : Sparkles;
+                    const OptionIcon = isVideoGenerationNode ? Film : isTextGenerationNode ? Type : option.model.includes("seedream") ? Film : Sparkles;
                     return (
                       <button
                         key={option.model}
@@ -2042,10 +2139,14 @@ function StudioShell() {
   const [assetMenu, setAssetMenu] = useState<AssetContextMenuState | null>(null);
   const [nextStepMenu, setNextStepMenu] = useState<NextStepMenuState | null>(null);
   const [assetPanelCollapsed, setAssetPanelCollapsed] = useState(true);
+  const [miniMapVisible, setMiniMapVisible] = useState(true);
+  const [connectionsVisible, setConnectionsVisible] = useState(true);
   const [agentCollapsed, setAgentCollapsed] = useState(false);
   const [imageModels, setImageModels] = useState<ImageModelOption[]>(fallbackImageModels);
+  const [textModels, setTextModels] = useState<TextModelOption[]>(fallbackTextModels);
   const [videoModels, setVideoModels] = useState<VideoModelOption[]>(fallbackVideoModels);
   const [selectedImageModel, setSelectedImageModel] = useState("gpt-image-2");
+  const [selectedTextModel, setSelectedTextModel] = useState("doubao-seed-2-0-pro-260215");
   const [selectedVideoModel, setSelectedVideoModel] = useState("doubao-seedance-1-5-pro-251215");
   const [imageParams, setImageParams] = useState<ImageGenerationParams>({
     quality: "标准画质",
@@ -2099,6 +2200,7 @@ function StudioShell() {
       selectedNode.data.label.includes("Kling") ||
       selectedNode.data.label.includes("Veo") ||
       selectedNode.data.label.includes("Gemini") ||
+      selectedNode.data.label.includes("Wan") ||
       selectedNode.data.label.includes("Bds"));
   const isTextGenerationNode =
     selectedNode?.type === "storyboardScript" &&
@@ -2221,6 +2323,24 @@ function StudioShell() {
 
   useEffect(() => {
     let active = true;
+    void listTextModels()
+      .then((result) => {
+        if (!active) return;
+        const nextModels = result.models.length ? result.models : fallbackTextModels;
+        setTextModels(nextModels);
+        setSelectedTextModel(result.default || nextModels[0]?.model || "doubao-seed-2-0-pro-260215");
+      })
+      .catch(() => {
+        if (!active) return;
+        setTextModels(fallbackTextModels);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
     void listVideoModels()
       .then((result) => {
         if (!active) return;
@@ -2253,6 +2373,12 @@ function StudioShell() {
     if (nodeModel) setSelectedVideoModel(nodeModel);
   }, [isVideoGenerationNode, selectedNode]);
 
+  useEffect(() => {
+    if (!isTextGenerationNode) return;
+    const nodeModel = typeof selectedNode?.data.config.model === "string" ? selectedNode.data.config.model : "";
+    if (nodeModel) setSelectedTextModel(nodeModel);
+  }, [isTextGenerationNode, selectedNode]);
+
   const handleSelectImageModel = (model: string) => {
     setSelectedImageModel(model);
     if (selectedNodeId && isImageGenerationNode) {
@@ -2260,10 +2386,24 @@ function StudioShell() {
     }
   };
 
-  const handleSelectVideoModel = (model: string) => {
-    setSelectedVideoModel(model);
-    if (selectedNodeId && isVideoGenerationNode) {
+  const handleSelectTextModel = (model: string) => {
+    setSelectedTextModel(model);
+    if (selectedNodeId && isTextGenerationNode) {
       updateNodeConfig(selectedNodeId, { model });
+    }
+  };
+
+  const handleSelectVideoModel = (model: string) => {
+    const nextParams = normalizeVideoParamsForModel(model, videoParams);
+    setSelectedVideoModel(model);
+    setVideoParams(nextParams);
+    if (selectedNodeId && isVideoGenerationNode) {
+      updateNodeConfig(selectedNodeId, {
+        model,
+        ratio: nextParams.ratio,
+        resolution: nextParams.resolution,
+        seconds: nextParams.seconds,
+      });
     }
   };
 
@@ -2496,10 +2636,7 @@ function StudioShell() {
     const references = upstreamContext.references
       .filter((item) => item.kind === "image")
       .map((item) => item.url) ?? [];
-    const normalizedVideoParams = {
-      ...videoParams,
-      ratio: videoParams.ratio === "Auto" ? "9:16" : videoParams.ratio,
-    };
+    const normalizedVideoParams = normalizeVideoParamsForModel(selectedVideoModel, videoParams);
     updateNodeData(nodeId, {
       status: "running",
       metric: "解析视频生成要求",
@@ -2595,12 +2732,12 @@ function StudioShell() {
     if (!selectedNode || !isTextGenerationNode || activeGenerationNodeIds.has(selectedNode.id)) return;
     const nodeId = selectedNode.id;
     if (!prompt.trim()) {
-      await runTextGeneration(nodeId, "");
+      await runTextGeneration(nodeId, "", selectedTextModel);
       return;
     }
     setActiveGenerationNodeIds((current) => new Set(current).add(nodeId));
     try {
-      await runTextGeneration(nodeId, prompt);
+      await runTextGeneration(nodeId, prompt, selectedTextModel);
     } finally {
       setActiveGenerationNodeIds((current) => {
         const next = new Set(current);
@@ -2632,6 +2769,8 @@ function StudioShell() {
           onChange={(event) => handleImage(event.target.files)}
         />
         <FlowCanvas
+          showMiniMap={miniMapVisible}
+          showConnections={connectionsVisible}
           onPaneContextMenu={handleCanvasContextMenu}
           onPaneClick={() => {
             if (ignoreNextPaneClickRef.current) {
@@ -2648,12 +2787,18 @@ function StudioShell() {
           collapsed={assetPanelCollapsed}
           onToggle={() => setAssetPanelCollapsed((value) => !value)}
           imageModels={imageModels}
+          textModels={textModels}
           videoModels={videoModels}
           selectedImageModel={selectedImageModel}
+          selectedTextModel={selectedTextModel}
           selectedVideoModel={selectedVideoModel}
         />
         <FloatingTools
           assetPanelCollapsed={assetPanelCollapsed}
+          miniMapVisible={miniMapVisible}
+          connectionsVisible={connectionsVisible}
+          onToggleMiniMap={() => setMiniMapVisible((visible) => !visible)}
+          onToggleConnections={() => setConnectionsVisible((visible) => !visible)}
           onOpenAddMenu={handleFloatingAddMenu}
         />
         {assetMenu && (
@@ -2677,8 +2822,10 @@ function StudioShell() {
             reference={composerReference}
             upstreamScriptCount={selectedUpstreamContext.scripts.length}
             imageModels={imageModels}
+            textModels={textModels}
             videoModels={videoModels}
             selectedImageModel={selectedImageModel}
+            selectedTextModel={selectedTextModel}
             selectedVideoModel={selectedVideoModel}
             imageParams={imageParams}
             videoParams={videoParams}
@@ -2691,6 +2838,7 @@ function StudioShell() {
             generatingText={isTextGenerationNode && selectedNodeGenerating}
             onRemoveReference={removeComposerReference}
             onSelectImageModel={handleSelectImageModel}
+            onSelectTextModel={handleSelectTextModel}
             onSelectVideoModel={handleSelectVideoModel}
             onChangeImageParams={setImageParams}
             onChangeVideoParams={setVideoParams}

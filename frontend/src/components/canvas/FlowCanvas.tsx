@@ -83,10 +83,14 @@ export function FlowCanvas({
   onPaneContextMenu,
   onPaneClick,
   onLooseConnectEnd,
+  showMiniMap = true,
+  showConnections = true,
 }: {
   onPaneContextMenu?: PaneContextMenuHandler;
   onPaneClick?: ReactFlowProps["onPaneClick"];
   onLooseConnectEnd?: LooseConnectHandler;
+  showMiniMap?: boolean;
+  showConnections?: boolean;
 }) {
   const {
     nodes,
@@ -270,7 +274,7 @@ export function FlowCanvas({
     <div className="h-full flex-1">
       <ReactFlow
         nodes={nodes}
-        edges={curvedEdges}
+        edges={showConnections ? curvedEdges : []}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={handleConnect}
@@ -294,11 +298,13 @@ export function FlowCanvas({
       >
         <Background gap={28} size={1.6} color="#202436" />
         <Controls className="!border-white/10 !bg-[#111118]/90 !text-zinc-200" />
-        <MiniMap
-          nodeColor="#8b5cf6"
-          maskColor="rgba(3,3,6,0.68)"
-          className="!border-white/10 !bg-[#111118]/90"
-        />
+        {showMiniMap && (
+          <MiniMap
+            nodeColor="#8b5cf6"
+            maskColor="rgba(3,3,6,0.68)"
+            className="!border-white/10 !bg-[#111118]/90"
+          />
+        )}
       </ReactFlow>
     </div>
   );

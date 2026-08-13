@@ -197,6 +197,16 @@ export interface ImageModelsResponse {
   default: string;
 }
 
+export interface TextModelOption {
+  model: string;
+  label: string;
+}
+
+export interface TextModelsResponse {
+  models: TextModelOption[];
+  default: string;
+}
+
 export interface ImageGeneratePayload {
   prompt: string;
   user_prompt?: string;
@@ -505,6 +515,11 @@ export async function downloadGeneratedVideo(videoId: string): Promise<Blob> {
 export async function listImageModels(): Promise<ImageModelsResponse> {
   const r = await fetchWithAuthRetry(`${BASE}/api/image/models`);
   return readJsonOrThrow<ImageModelsResponse>(r, "图片模型列表获取失败");
+}
+
+export async function listTextModels(): Promise<TextModelsResponse> {
+  const r = await fetchWithAuthRetry(`${BASE}/api/text/models`);
+  return readJsonOrThrow<TextModelsResponse>(r, "剧本模型列表获取失败");
 }
 
 export async function generateImage(payload: ImageGeneratePayload): Promise<ImageGenerateResponse> {

@@ -39,12 +39,21 @@ TOKENOPS_GENERATION_MODEL = os.getenv("TOKENOPS_GENERATION_MODEL", "doubao-seeda
 BDS_PRO_MODEL = "bds-pro"
 TOKENOPS_SEEDANCE_15_MODEL = "doubao-seedance-1-5-pro-251215"
 LOVART_VIDEO_PREFIX = "lovart:"
+WAN22_I2V_MODEL = "wan2.2-i2v-spicy"
+WAN27_I2V_MODEL = "wan2.7-i2v-spicy"
+WAN_VIDEO_PREFIX = "wan:"
 BDS_A2_BASE_URL = os.getenv("BDS_A2_BASE_URL", os.getenv("A2_VIDEO_BASE_URL", "https://cu-api.uniphore-ai.com")).rstrip("/")
+MULEROUTER_BASE_URL = os.getenv(
+    "MULEROUTER_BASE_URL",
+    os.getenv("MULEROUTER_VIDEO_BASE_URL", "https://api.mulerouter.ai"),
+).rstrip("/")
 TOKENOPS_GENERATION_MODELS = os.getenv(
     "TOKENOPS_GENERATION_MODELS",
     ",".join(
         [
             f"{BDS_PRO_MODEL}:Bds Pro",
+            f"{WAN22_I2V_MODEL}:Wan 2.2",
+            f"{WAN27_I2V_MODEL}:Wan 2.7",
             "doubao-seedance-1-5-pro-251215:Seedance 1.5 Pro",
             "seedance-2-0:Seedance 2.0",
             "seedance-2-0-fast:Seedance 2.0 Fast",
@@ -179,6 +188,10 @@ def _is_tokenops_video_model(model: str) -> bool:
     return model == TOKENOPS_SEEDANCE_15_MODEL
 
 
+def _is_mulerouter_video_model(model: str) -> bool:
+    return model in {WAN22_I2V_MODEL, WAN27_I2V_MODEL}
+
+
 def _tokenops_video_reference_limit(model: str) -> int:
     if model == TOKENOPS_SEEDANCE_15_MODEL:
         return 2
@@ -195,6 +208,17 @@ def _tokenops_key() -> str:
     key = os.getenv("TOKENOPS_API_KEY", "").strip()
     if not key:
         raise HTTPException(status_code=500, detail="TOKENOPS_API_KEY is not configured")
+    return key
+
+
+def _mulerouter_key() -> str:
+    key = (
+        os.getenv("MULEROUTER_API_KEY", "").strip()
+        or os.getenv("MULEROUTER_VIDEO_API_KEY", "").strip()
+        or os.getenv("SEEDREAMBEST_VIDEO_PROVIDER_API_KEY", "").strip()
+    )
+    if not key:
+        raise HTTPException(status_code=500, detail="MULEROUTER_API_KEY is not configured")
     return key
 
 
@@ -436,6 +460,28 @@ async def _resolve_tokenops_reference_image(db: Session, user: User, reference: 
         return image_data_url
 
     return value
+
+
+def _resolve_mulerouter_reference_image(db: Session, user: User, reference: str) -> str:
+    value = reference.strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="Wan 图生视频参考图片为空")
+    if value.startswith("blob:") or value.startswith("data:"):
+        raise HTTPException(status_code=400, detail="Wan 图生视频需要公网可访问图片 URL，请先使用已生成图片或远程资产")
+
+    asset = _asset_from_reference(db, user, value)
+    if asset:
+        public_source_url = _asset_public_source_url(asset)
+        if public_source_url:
+            return public_source_url
+        if storage.is_remote:
+            return storage.presign_download(asset.storage_key, asset.title)
+        raise HTTPException(status_code=400, detail="Wan 图生视频需要公网可访问图片 URL，当前本地上传图片无法直接作为参考图")
+
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return value
+    raise HTTPException(status_code=400, detail="Wan 图生视频参考图片必须是公网 URL")
 
 
 async def _image_reference_to_data_url(db: Session, user: User, reference: str) -> tuple[str, str]:
@@ -730,6 +776,204 @@ async def _download_bds_video(video_id: str) -> tuple[bytes, str]:
         response.raise_for_status()
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Bds Pro 视频下载失败：{exc}") from exc
+    return response.content, response.headers.get("content-type") or "video/mp4"
+
+
+def _mulerouter_video_id(model: str, task_id: str) -> str:
+    return f"{WAN_VIDEO_PREFIX}{model}:{task_id}"
+
+
+def _mulerouter_video_parts(video_id: str) -> tuple[str, str]:
+    if not video_id.startswith(WAN_VIDEO_PREFIX):
+        raise HTTPException(status_code=400, detail="不是 Wan 视频任务")
+    value = video_id[len(WAN_VIDEO_PREFIX):]
+    model, separator, task_id = value.partition(":")
+    if not separator or model not in {WAN22_I2V_MODEL, WAN27_I2V_MODEL} or not task_id.strip():
+        raise HTTPException(status_code=400, detail="Wan 视频任务 ID 无效")
+    return model, task_id.strip()
+
+
+def _mulerouter_create_url(model: str) -> str:
+    return f"{MULEROUTER_BASE_URL}/vendors/carrothub/v1/{model}/generation"
+
+
+def _mulerouter_22_i2v_resolution(value: str) -> str:
+    return "720p" if value.lower() == "720p" else "480p"
+
+
+def _mulerouter_27_i2v_resolution(value: str) -> str:
+    return "720p" if value.lower() == "720p" else "1080p"
+
+
+def _normalize_mulerouter_22_duration(value: int) -> int:
+    return 8 if int(value) == 8 else 5
+
+
+def _normalize_mulerouter_27_duration(value: int) -> int:
+    return max(2, min(int(value), 15))
+
+
+def _build_mulerouter_video_payload(payload: VideoGenerateRequest, image_urls: list[str], model: str) -> dict[str, Any]:
+    if not image_urls:
+        raise HTTPException(status_code=400, detail="Wan 图生视频需要至少一张参考图")
+
+    request: dict[str, Any] = {
+        "prompt": (payload.prompt.strip() or "Generate a smooth, natural video.")[:2000],
+        "image": image_urls[0],
+        "prompt_extend": True,
+    }
+    if model == WAN22_I2V_MODEL:
+        request["resolution"] = _mulerouter_22_i2v_resolution(payload.resolution)
+        request["duration"] = _normalize_mulerouter_22_duration(payload.seconds)
+        return request
+
+    request["resolution"] = _mulerouter_27_i2v_resolution(payload.resolution)
+    request["duration"] = _normalize_mulerouter_27_duration(payload.seconds)
+    if len(image_urls) > 1:
+        request["last_frame"] = image_urls[1]
+    return request
+
+
+def _mulerouter_task_status(data: dict[str, Any]) -> str:
+    raw = str((data.get("task_info") or {}).get("status") or data.get("status") or "").strip().lower()
+    if raw in {"completed", "complete", "success", "succeeded", "done"}:
+        return "completed"
+    if raw in {"failed", "fail", "error", "expired", "cancelled", "canceled"}:
+        return "failed"
+    if raw in {"queued", "pending", "in_queue"}:
+        return "queued"
+    return "running"
+
+
+def _mulerouter_task_error(data: dict[str, Any]) -> str:
+    error = (data.get("task_info") or {}).get("error") or data.get("error") or data.get("message") or data.get("detail")
+    if isinstance(error, dict):
+        for key in ("message", "detail", "error_message", "exception_message"):
+            if error.get(key):
+                return str(error[key])
+        return json.dumps(error, ensure_ascii=False)[:1000]
+    return str(error or "").strip()
+
+
+def _extract_mulerouter_video_url(data: dict[str, Any]) -> str:
+    videos = data.get("videos")
+    if isinstance(videos, list) and videos:
+        return str(videos[0])
+
+    output = data.get("output")
+    if isinstance(output, dict):
+        output_videos = output.get("videos")
+        if isinstance(output_videos, list) and output_videos:
+            return str(output_videos[0])
+        if output.get("video_url"):
+            return str(output["video_url"])
+
+    content = data.get("content")
+    if isinstance(content, dict) and content.get("video_url"):
+        return str(content["video_url"])
+
+    if data.get("video"):
+        return str(data["video"])
+    urls = _extract_video_urls(data)
+    return urls[0] if urls else ""
+
+
+async def _create_mulerouter_video(payload: VideoGenerateRequest, db: Session, user: User, model: str) -> dict[str, Any]:
+    limit = 1 if model == WAN22_I2V_MODEL else 2
+    image_urls = [
+        _resolve_mulerouter_reference_image(db, user, reference)
+        for reference in payload.reference_images
+        if reference.strip()
+    ][:limit]
+    request_payload = _build_mulerouter_video_payload(payload, image_urls, model)
+    key = _mulerouter_key()
+    create_url = _mulerouter_create_url(model)
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=20)) as client:
+            response = await client.post(
+                create_url,
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json=request_payload,
+            )
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="Wan 视频生成任务创建超时，请稍后重试") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Wan 视频生成请求失败：{exc}") from exc
+
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail=_remote_error(response, "Wan video generation failed"))
+
+    result = response.json()
+    task_info = result.get("task_info") if isinstance(result.get("task_info"), dict) else {}
+    task_id = str(task_info.get("id") or result.get("id") or "").strip()
+    if not task_id:
+        raise HTTPException(status_code=502, detail="Wan 视频生成未返回任务 ID")
+
+    return {
+        **result,
+        "id": _mulerouter_video_id(model, task_id),
+        "model": model,
+        "status": _mulerouter_task_status(result),
+        "request": {
+            "provider": "mulerouter",
+            "vendor": "carrothub",
+            "model": model,
+            "ratio": payload.ratio,
+            "resolution": request_payload.get("resolution"),
+            "seconds": request_payload.get("duration"),
+            "reference_image_count": len(image_urls),
+        },
+    }
+
+
+async def _get_mulerouter_video_status(video_id: str) -> dict[str, Any]:
+    model, task_id = _mulerouter_video_parts(video_id)
+    key = _mulerouter_key()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=20), follow_redirects=True) as client:
+            response = await client.get(
+                f"{_mulerouter_create_url(model)}/{task_id}",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="Wan 视频状态查询超时，请稍后重试") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Wan 视频状态查询失败：{exc}") from exc
+
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail=_remote_error(response, "Wan video status failed"))
+
+    data = response.json()
+    if not isinstance(data, dict):
+        data = {}
+    status = _mulerouter_task_status(data)
+    video_url = _extract_mulerouter_video_url(data) if status == "completed" else ""
+    if status == "completed" and not video_url:
+        status = "failed"
+    error = _mulerouter_task_error(data) if status == "failed" else ""
+    return {
+        **data,
+        "id": video_id,
+        "model": model,
+        "status": status,
+        "error": error,
+        "videoUrls": [video_url] if video_url else [],
+        "content_path": f"/api/video/generate/{video_id}/content" if status == "completed" and video_url else "",
+    }
+
+
+async def _download_mulerouter_video(video_id: str) -> tuple[bytes, str]:
+    status = await _get_mulerouter_video_status(video_id)
+    urls = status.get("videoUrls")
+    if not isinstance(urls, list) or not urls:
+        raise HTTPException(status_code=404, detail="Wan 视频结果不存在")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20), follow_redirects=True) as client:
+            response = await client.get(str(urls[0]))
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Wan 视频下载失败：{exc}") from exc
     return response.content, response.headers.get("content-type") or "video/mp4"
 
 
@@ -1627,14 +1871,32 @@ def _audio_note(transcript: dict[str, Any]) -> str:
 def _validate_generation_request(payload: VideoGenerateRequest) -> None:
     if not payload.prompt.strip():
         raise HTTPException(status_code=400, detail="生成提示词不能为空")
-    _select_generation_model(payload)
+    model = _select_generation_model(payload)
     if payload.ratio not in SEEDANCE_RATIOS:
         raise HTTPException(status_code=400, detail="不支持的视频比例")
     if payload.resolution not in SEEDANCE_RESOLUTIONS:
         raise HTTPException(status_code=400, detail="不支持的视频分辨率")
+
+    if model == WAN22_I2V_MODEL:
+        if payload.resolution not in {"480p", "720p"}:
+            raise HTTPException(status_code=400, detail="Wan 2.2 仅支持 480p/720p")
+        if payload.seconds not in {5, 8}:
+            raise HTTPException(status_code=400, detail="Wan 2.2 仅支持 5 秒或 8 秒")
+        if not any(item.strip() for item in payload.reference_images):
+            raise HTTPException(status_code=400, detail="Wan 2.2 需要 1 张参考图")
+        return
+
+    if model == WAN27_I2V_MODEL:
+        if payload.resolution not in {"720p", "1080p"}:
+            raise HTTPException(status_code=400, detail="Wan 2.7 仅支持 720p/1080p")
+        if not 2 <= payload.seconds <= 15:
+            raise HTTPException(status_code=400, detail="Wan 2.7 时长需在 2-15 秒之间")
+        if not any(item.strip() for item in payload.reference_images):
+            raise HTTPException(status_code=400, detail="Wan 2.7 需要至少 1 张参考图")
+        return
+
     if payload.seconds not in SEEDANCE_SECONDS:
         raise HTTPException(status_code=400, detail="Seedance 视频时长需在 4-15 秒之间")
-    model = _select_generation_model(payload)
     if model == TOKENOPS_SEEDANCE_15_MODEL and payload.seconds > 12:
         raise HTTPException(status_code=400, detail="Seedance 1.5 Pro 时长需在 4-12 秒之间")
 
@@ -1654,6 +1916,8 @@ async def generate_video(
     model = _select_generation_model(payload)
     if _is_bds_model(model):
         return await _create_bds_video(payload, db, user)
+    if _is_mulerouter_video_model(model):
+        return await _create_mulerouter_video(payload, db, user, model)
     if not _is_tokenops_video_model(model):
         return await _create_lovart_video(payload, db, user, model)
 
@@ -1729,6 +1993,8 @@ async def get_generated_video_status(
 ):
     if video_id.startswith(f"{BDS_PRO_MODEL}:"):
         return await _get_bds_status(video_id)
+    if video_id.startswith(WAN_VIDEO_PREFIX):
+        return await _get_mulerouter_video_status(video_id)
     if video_id.startswith(LOVART_VIDEO_PREFIX):
         return await _get_lovart_video_status(video_id)
 
@@ -1761,6 +2027,9 @@ async def download_generated_video(
 ):
     if video_id.startswith(f"{BDS_PRO_MODEL}:"):
         content, media_type = await _download_bds_video(video_id)
+        return Response(content=content, media_type=media_type)
+    if video_id.startswith(WAN_VIDEO_PREFIX):
+        content, media_type = await _download_mulerouter_video(video_id)
         return Response(content=content, media_type=media_type)
     if video_id.startswith(LOVART_VIDEO_PREFIX):
         content, media_type = await _download_lovart_video(video_id)
