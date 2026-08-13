@@ -9,6 +9,10 @@
 /coverage
 /.pycache/
 
+# runtime data
+/backend/data/uploads/
+/backend/*.db
+
 # next.js
 /.next/
 /out/
