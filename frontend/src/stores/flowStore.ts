@@ -2458,18 +2458,16 @@ export const useFlowStore = create<FlowState>((set, get) => ({
   },
 
   loadFlow: async (id: string) => {
-    try {
-      const record = await getFlow(id);
-      const nodes = record.nodes as Node<NodeData>[];
-      set({
-        flowId: record.id,
-        flowName: record.name,
-        nodes,
-        edges: curvedEdges(record.edges as Edge[]),
-      });
-      queueVideoGenerationRecovery(get, pendingVideoGenerationNodeIds(nodes));
-      queueProjectVideoCache(get, pendingProjectVideoCacheNodeIds(nodes));
-    } catch {}
+    const record = await getFlow(id);
+    const nodes = record.nodes as Node<NodeData>[];
+    set({
+      flowId: record.id,
+      flowName: record.name,
+      nodes,
+      edges: curvedEdges(record.edges as Edge[]),
+    });
+    queueVideoGenerationRecovery(get, pendingVideoGenerationNodeIds(nodes));
+    queueProjectVideoCache(get, pendingProjectVideoCacheNodeIds(nodes));
   },
 
   loadLatest: async () => {

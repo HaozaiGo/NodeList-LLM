@@ -39,8 +39,10 @@ import { HomeLanding } from "@/components/landing/HomeLanding";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
+  ApiError,
   createVideoGenerationSpec,
   downloadGeneratedVideo,
+  isAuthExpiredError,
   listAssets,
   listImageModels,
   listTextModels,
@@ -2854,23 +2856,50 @@ function StudioShell() {
 
 export default function Home() {
   const router = useRouter();
-  const { hydrate, hydrated, token } = useAuthStore();
+  const { hydrate, hydrated, token, logout } = useAuthStore();
   const loadFlow = useFlowStore((state) => state.loadFlow);
-  const [studioRequested, setStudioRequested] = useState(false);
-  const [initialAuthMode, setInitialAuthMode] = useState<"login" | "register" | null>(null);
+  const [studioRequested, setStudioRequested] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("studio") === "1";
+  });
+  const [initialAuthMode, setInitialAuthMode] = useState<"login" | "register" | null>(() => {
+    if (typeof window === "undefined") return null;
+    const authMode = new URLSearchParams(window.location.search).get("auth");
+    return authMode === "login" || authMode === "register" ? authMode : null;
+  });
+  const [studioBooting, setStudioBooting] = useState(false);
+  const [studioError, setStudioError] = useState("");
+  const bootFlowIdRef = useRef<string | null>(null);
 
-  const boot = useMemo(
-    () => async () => {
+  const boot = useCallback(
+    async () => {
       const params = new URLSearchParams(window.location.search);
       const requestedFlowId = params.get("flow");
       if (requestedFlowId) {
-        await loadFlow(requestedFlowId);
+        setStudioBooting(true);
+        setStudioError("");
+        try {
+          await loadFlow(requestedFlowId);
+        } catch (error) {
+          if (isAuthExpiredError(error)) {
+            logout();
+            router.replace("/?auth=login");
+            return;
+          }
+          if (error instanceof ApiError && error.status === 404) {
+            router.replace("/projects");
+            return;
+          }
+          setStudioError(error instanceof Error ? error.message : "项目加载失败");
+        } finally {
+          setStudioBooting(false);
+        }
       } else {
         router.replace("/projects");
         return;
       }
     },
-    [loadFlow, router]
+    [loadFlow, logout, router]
   );
 
   useEffect(() => {
@@ -2888,6 +2917,10 @@ export default function Home() {
     if (!hydrated) return;
     if (!studioRequested) return;
     if (!token) return;
+    const params = new URLSearchParams(window.location.search);
+    const requestedFlowId = params.get("flow");
+    if (bootFlowIdRef.current === requestedFlowId) return;
+    bootFlowIdRef.current = requestedFlowId;
     void boot();
   }, [boot, hydrated, studioRequested, token]);
 
@@ -2899,6 +2932,21 @@ export default function Home() {
         authRequired={studioRequested && !token}
         initialAuthMode={initialAuthMode}
       />
+    );
+  }
+  if (studioBooting) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-[#030306] text-sm text-zinc-400">
+        正在打开项目空间...
+      </main>
+    );
+  }
+  if (studioError) {
+    return (
+      <main className="flex min-h-screen flex-col items-center justify-center gap-4 bg-[#030306] text-zinc-200">
+        <p className="text-sm text-zinc-400">{studioError}</p>
+        <Button onClick={() => router.replace("/projects")}>返回项目空间</Button>
+      </main>
     );
   }
 
