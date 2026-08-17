@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import {
   ArrowUp,
   Boxes,
+  BrainCircuit,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -55,6 +56,18 @@ import {
   type VideoGenerationSpec,
   type VideoModelOption,
 } from "@/lib/api";
+import {
+  fallbackVideoModels,
+  modelLabel,
+  normalizeVideoModelOptions,
+  normalizeVideoParamsForModel,
+  videoModelMeta,
+  videoModes,
+  videoRatios,
+  videoResolutions,
+  videoSeconds,
+  type VideoGenerationParams,
+} from "@/lib/videoGenerationOptions";
 import { useAuthStore } from "@/stores/authStore";
 import { useFlowStore } from "@/stores/flowStore";
 import type { ImageAssetItem, ImageAssetTag, NodeData, StudioNodeStatus } from "@/types/flow";
@@ -94,21 +107,6 @@ const fallbackImageModels: ImageModelOption[] = [
   { model: "luma-uni-1-max", label: "Luma Uni-1 Max" },
 ];
 
-const fallbackVideoModels: VideoModelOption[] = [
-  { model: "bds-pro", label: "Bds Pro" },
-  { model: "wan2.2-i2v-spicy", label: "Wan 2.2" },
-  { model: "wan2.7-i2v-spicy", label: "Wan 2.7" },
-  { model: "doubao-seedance-1-5-pro-251215", label: "Seedance 1.5 Pro" },
-  { model: "seedance-2-0", label: "Seedance 2.0" },
-  { model: "seedance-2-0-fast", label: "Seedance 2.0 Fast" },
-  { model: "seedance-2-0-mini", label: "Seedance 2.0 Mini" },
-  { model: "kling-3-0", label: "Kling 3.0" },
-  { model: "kling-3-0-omni", label: "Kling 3.0 Omni" },
-  { model: "veo-3-1", label: "Veo 3.1" },
-  { model: "veo-3-1-fast", label: "Veo 3.1 Fast" },
-  { model: "gemini-omni-flash", label: "Gemini Omni Flash" },
-];
-
 const fallbackTextModels: TextModelOption[] = [
   { model: "doubao-seed-2-0-pro-260215", label: "Doubao Seed 2.0 Pro" },
   { model: "qwen3.8-max", label: "Qwen3.8-Max" },
@@ -125,29 +123,10 @@ const imageModelMeta: Record<string, { description: string; chip: string }> = {
   "luma-uni-1-max": { description: "更高质量的风格化输出", chip: "60s" },
 };
 
-const videoModelMeta: Record<string, { description: string; chip: string }> = {
-  "bds-pro": { description: "最多2图：首帧+人物脸参考。适合单主体图生视频，不适合6图综合参考。", chip: "60s" },
-  "wan2.2-i2v-spicy": { description: "Wan 2.2 图生视频。使用1张首帧图，支持5s/8s与480p/720p。", chip: "60s" },
-  "wan2.7-i2v-spicy": { description: "Wan 2.7 图生视频。支持首帧或首尾帧，适合更强动作和镜头过渡。", chip: "90s" },
-  "doubao-seedance-1-5-pro-251215": { description: "最多2图：首帧+尾帧控制。稳定出片，适合明确起止画面的短镜头。", chip: "60s" },
-  "seedance-2-0": { description: "支持多图参考。适合人物/场景/道具多素材合成，运动和叙事均衡。", chip: "60s" },
-  "seedance-2-0-fast": { description: "支持多图参考。更快出片，适合6图参考的快速预览和多轮试错。", chip: "35s" },
-  "seedance-2-0-mini": { description: "支持多图参考。轻量低成本，适合草稿验证，不追求最高质感。", chip: "25s" },
-  "kling-3-0": { description: "支持多图参考。强运动表现，适合人物动作、镜头推进和动态转场。", chip: "60s" },
-  "kling-3-0-omni": { description: "支持多图参考。多模态素材适配强，适合复杂参考图和角色一致性尝试。", chip: "60s" },
-  "veo-3-1": { description: "支持多图参考。电影感和复杂场景更强，适合高质量成片探索。", chip: "90s" },
-  "veo-3-1-fast": { description: "支持多图参考。Veo 快速模式，适合批量方向测试。", chip: "50s" },
-  "gemini-omni-flash": { description: "支持多图参考。快速多模态生成与理解，适合轻量创意预览。", chip: "35s" },
-};
-
 const textModelMeta: Record<string, { description: string; chip: string }> = {
   "doubao-seed-2-0-pro-260215": { description: "豆包脚本润色与短剧文案生成，沿用原剧本链路。", chip: "流式" },
   "qwen3.8-max": { description: "Qwen3.8-Max 长文本剧本生成，适合复杂分镜、台词和叙事推演。", chip: "流式" },
 };
-
-function modelLabel(options: Array<{ model: string; label: string }>, model: string, fallback: string) {
-  return options.find((option) => option.model === model)?.label ?? (model || fallback);
-}
 
 type ImageQuality = "低画质" | "标准画质" | "高画质";
 
@@ -158,47 +137,10 @@ type ImageGenerationParams = {
   count: 1 | 2 | 4;
 };
 
-type VideoGenerationMode = "reference" | "edit" | "first-last";
-
-type VideoGenerationParams = {
-  mode: VideoGenerationMode;
-  ratio: string;
-  resolution: "480p" | "720p" | "1080p" | "4k";
-  seconds: 5 | 8 | 10 | 15;
-  generate_audio: boolean;
-  camerafixed: boolean;
-};
-
 const imageQualities: ImageQuality[] = ["低画质", "标准画质", "高画质"];
 const imageResolutions: ImageGenerationParams["resolution"][] = ["1K", "2K", "4K"];
 const imageRatios = ["1:1", "1:2", "2:1", "9:16", "16:9", "3:4", "4:3", "3:2", "2:3", "5:4", "4:5", "21:9", "9:21"];
 const imageCounts: ImageGenerationParams["count"][] = [1, 2, 4];
-const videoModes: Array<{ value: VideoGenerationMode; label: string }> = [
-  { value: "reference", label: "参考图/视频" },
-  { value: "edit", label: "视频编辑" },
-  { value: "first-last", label: "首尾帧" },
-];
-const videoRatios = ["Auto", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"];
-const videoResolutions: VideoGenerationParams["resolution"][] = ["480p", "720p", "1080p", "4k"];
-const videoSeconds: VideoGenerationParams["seconds"][] = [5, 8, 10, 15];
-
-function normalizeVideoParamsForModel(model: string, params: VideoGenerationParams): VideoGenerationParams {
-  const normalized: VideoGenerationParams = {
-    ...params,
-    ratio: params.ratio === "Auto" ? "9:16" : params.ratio,
-  };
-
-  if (model === "wan2.2-i2v-spicy") {
-    normalized.resolution = params.resolution === "480p" ? "480p" : "720p";
-    normalized.seconds = params.seconds === 5 ? 5 : 8;
-  }
-
-  if (model === "wan2.7-i2v-spicy") {
-    normalized.resolution = params.resolution === "1080p" ? "1080p" : "720p";
-  }
-
-  return normalized;
-}
 
 const settingImageOptions = [
   {
@@ -517,7 +459,7 @@ function buildBdsVideoPromptWithUpstream(
   context: UpstreamContext,
   params: VideoGenerationParams
 ) {
-  const basePrompt = userPrompt.trim() || "基于上游参考图片生成一个单镜头短视频。";
+  const basePrompt = userPrompt.trim() || "基于上游多张参考图片生成一个单镜头短视频。";
   const shotNumbers = requestedShotNumbers(basePrompt);
   const scriptRows = context.scripts
     .map((item) => extractScriptRows(item.text, shotNumbers))
@@ -533,9 +475,9 @@ function buildBdsVideoPromptWithUpstream(
 
   return [
     compactForModel(basePrompt, 180),
-    `生成一个连续单镜头图生视频，不要生成整部剧，不要拆成多镜头。画幅 ${params.ratio}，时长 ${params.seconds}s，分辨率 ${params.resolution}。`,
+    `使用 MiniMax h3 多参图生视频生成一个连续单镜头短视频，不要生成整部剧，不要拆成多镜头。画幅 ${params.ratio}，时长 ${params.seconds}s，分辨率 ${params.resolution}。`,
     selectedScript ? `参考分镜：${compactForModel(selectedScript, 520)}` : "",
-    referenceCount ? `使用已附加的 ${referenceCount} 张上游图片作为首帧/角色参考。` : "",
+    referenceCount ? `使用已附加的 ${referenceCount} 张上游图片作为首帧、主体、脸部、背景、姿态或尾帧参考。` : "",
     imageUsageText ? `参考图用途标签：\n${compactForModel(imageUsageText, 520)}` : "",
     "画面要求：主体清晰，动作自然，镜头运动轻微，商业短视频质感，不要文字、水印、Logo。",
   ]
@@ -688,7 +630,8 @@ function AssetPanel({
       selectedData?.label.includes("Kling") ||
       selectedData?.label.includes("Veo") ||
       selectedData?.label.includes("Gemini") ||
-      selectedData?.label.includes("Bds"));
+      selectedData?.label.includes("Bds") ||
+      selectedData?.label.includes("MiniMax"));
   const selectedIsTextGeneration =
     selectedFlowNode?.type === "storyboardScript" &&
     (selectedConfig.mode === "referenced_text" ||
@@ -1329,11 +1272,13 @@ function AddAssetMenu({
   position,
   onPickVideo,
   onPickImage,
+  onPickScript,
   onAddVideoStitcher,
 }: {
   position: ContextMenuPosition;
   onPickVideo: () => void;
   onPickImage: () => void;
+  onPickScript: () => void;
   onAddVideoStitcher: () => void;
 }) {
   return (
@@ -1351,7 +1296,7 @@ function AddAssetMenu({
         { icon: FileVideo, label: "上传视频", action: onPickVideo },
         { icon: Image, label: "上传图片", action: onPickImage },
         { icon: Film, label: "视频拼接器", action: onAddVideoStitcher },
-        { icon: Clapperboard, label: "上传剧本", action: undefined },
+        { icon: Clapperboard, label: "上传剧本", action: onPickScript },
       ].map(({ icon: Icon, label, action }) => (
         <button
           key={label}
@@ -1371,7 +1316,7 @@ function NextStepMenu({
   onPick,
 }: {
   position: ContextMenuPosition;
-  onPick: (kind: "text" | "image" | "video") => void;
+  onPick: (kind: "text" | "image" | "video" | "analysis") => void;
 }) {
   return (
     <div
@@ -1386,6 +1331,7 @@ function NextStepMenu({
         { icon: Type, label: "文本", kind: "text" as const },
         { icon: Image, label: "图片", kind: "image" as const },
         { icon: FileVideo, label: "视频", kind: "video" as const },
+        { icon: BrainCircuit, label: "视频分析", kind: "analysis" as const },
       ].map(({ icon: Icon, label, kind }) => (
         <button
           key={kind}
@@ -1475,7 +1421,6 @@ function Composer({
   const imageReferenceCount = references.filter((item) => item.kind === "image").length;
   const referenceBadgeCount = references.length;
   const limitedVideoReferenceModel =
-    selectedVideoModel === "bds-pro" ||
     selectedVideoModel === "wan2.2-i2v-spicy" ||
     selectedVideoModel === "wan2.7-i2v-spicy" ||
     selectedVideoModel === "doubao-seedance-1-5-pro-251215";
@@ -1487,7 +1432,7 @@ function Composer({
         : `当前模型支持多图参考，将引用${imageReferenceCount}张图片`
       : "";
   const selectedModelLabel = isVideoGenerationNode
-    ? videoModels.find((item) => item.model === selectedVideoModel)?.label ?? "视频模型"
+    ? modelLabel(videoModels, selectedVideoModel, "视频模型")
     : isTextGenerationNode
       ? textModels.find((item) => item.model === selectedTextModel)?.label ?? "剧本模型"
     : imageModels.find((item) => item.model === selectedImageModel)?.label ?? "Lib Image";
@@ -1738,7 +1683,7 @@ function Composer({
                         </span>
                         <span className="min-w-0 flex-1">
                           <span className={cn("block truncate text-sm font-semibold", selected ? "text-white" : "text-zinc-100")}>
-                            {option.label}
+                            {modelLabel(activeModelOptions, option.model, option.label)}
                           </span>
                           <span className="mt-0.5 block text-xs leading-4 text-zinc-500">{meta.description}</span>
                         </span>
@@ -2168,8 +2113,10 @@ function StudioShell() {
   const [excludedReferencesByNode, setExcludedReferencesByNode] = useState<Record<string, string[]>>({});
   const inputRef = useRef<HTMLInputElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const scriptInputRef = useRef<HTMLInputElement | null>(null);
   const pendingUploadPositionRef = useRef<XYPosition | null>(null);
   const pendingImageUploadPositionRef = useRef<XYPosition | null>(null);
+  const pendingScriptUploadPositionRef = useRef<XYPosition | null>(null);
   const pendingImageAppendNodeIdRef = useRef<string | null>(null);
   const pendingReplaceNodeIdRef = useRef<string | null>(null);
   const videoObjectUrlsRef = useRef<string[]>([]);
@@ -2178,6 +2125,7 @@ function StudioShell() {
   const addVideoUploadNode = useFlowStore((state) => state.addVideoUploadNode);
   const addVideoStitcherNode = useFlowStore((state) => state.addVideoStitcherNode);
   const addImageUploadNode = useFlowStore((state) => state.addImageUploadNode);
+  const addScriptUploadNode = useFlowStore((state) => state.addScriptUploadNode);
   const appendImagesToNode = useFlowStore((state) => state.appendImagesToNode);
   const updateImageAsset = useFlowStore((state) => state.updateImageAsset);
   const updateNodeConfig = useFlowStore((state) => state.updateNodeConfig);
@@ -2203,7 +2151,8 @@ function StudioShell() {
       selectedNode.data.label.includes("Veo") ||
       selectedNode.data.label.includes("Gemini") ||
       selectedNode.data.label.includes("Wan") ||
-      selectedNode.data.label.includes("Bds"));
+      selectedNode.data.label.includes("Bds") ||
+      selectedNode.data.label.includes("MiniMax"));
   const isTextGenerationNode =
     selectedNode?.type === "storyboardScript" &&
     (selectedNode.data.config.mode === "referenced_text" ||
@@ -2346,13 +2295,13 @@ function StudioShell() {
     void listVideoModels()
       .then((result) => {
         if (!active) return;
-        const nextModels = result.models.length ? result.models : fallbackVideoModels;
+        const nextModels = normalizeVideoModelOptions(result.models.length ? result.models : fallbackVideoModels);
         setVideoModels(nextModels);
         setSelectedVideoModel(result.default || nextModels[0]?.model || "doubao-seedance-1-5-pro-251215");
       })
       .catch(() => {
         if (!active) return;
-        setVideoModels(fallbackVideoModels);
+        setVideoModels(normalizeVideoModelOptions(fallbackVideoModels));
       });
     return () => {
       active = false;
@@ -2460,7 +2409,7 @@ function StudioShell() {
     flowPosition: XYPosition;
   }) => {
     const menuWidth = 196;
-    const menuHeight = 154;
+    const menuHeight = 196;
     const gutter = 16;
     ignoreNextPaneClickRef.current = true;
     closeAssetMenu();
@@ -2474,7 +2423,7 @@ function StudioShell() {
     });
   };
 
-  const handlePickNextStep = (kind: "text" | "image" | "video") => {
+  const handlePickNextStep = (kind: "text" | "image" | "video" | "analysis") => {
     if (!nextStepMenu) return;
     addReferencedNode(nextStepMenu.sourceNodeId, kind, nextStepMenu.flowPosition);
     closeNextStepMenu();
@@ -2563,6 +2512,86 @@ function StudioShell() {
     closeAssetMenu();
   };
 
+  const isScriptUploadFile = (file: File) => {
+    const contentType = file.type.toLowerCase();
+    const extension = file.name.toLowerCase().match(/\.[^.]+$/)?.[0] ?? "";
+    const allowedExtensions = new Set([".txt", ".md", ".markdown", ".srt", ".vtt", ".csv", ".json"]);
+    const allowedMimeTypes = new Set([
+      "application/json",
+      "application/x-subrip",
+      "text/markdown",
+      "text/plain",
+      "text/vtt",
+      "text/csv",
+    ]);
+    return contentType.startsWith("text/") || allowedMimeTypes.has(contentType) || allowedExtensions.has(extension);
+  };
+
+  const handleScript = async (file?: File) => {
+    if (!file) return;
+    if (!isScriptUploadFile(file)) {
+      window.alert("请上传 txt、md、srt、vtt、csv 或 json 格式的剧本文本文件");
+      if (scriptInputRef.current) scriptInputRef.current.value = "";
+      return;
+    }
+
+    let content = "";
+    try {
+      content = (await file.text()).replace(/^\uFEFF/, "").trimEnd();
+    } catch {
+      window.alert("剧本读取失败，请换一个文本文件重试");
+      if (scriptInputRef.current) scriptInputRef.current.value = "";
+      return;
+    }
+
+    if (!content.trim()) {
+      window.alert("剧本内容为空，请上传包含文本的文件");
+      if (scriptInputRef.current) scriptInputRef.current.value = "";
+      return;
+    }
+
+    const position = pendingScriptUploadPositionRef.current;
+    if (!position) {
+      if (scriptInputRef.current) scriptInputRef.current.value = "";
+      return;
+    }
+
+    const nodeId = addScriptUploadNode(file.name, content, position);
+    void uploadAsset({
+      file,
+      kind: "script",
+      flowId,
+      nodeId,
+      title: file.name,
+      tag: "script",
+    })
+      .then((asset) => {
+        updateNodeConfig(nodeId, {
+          assetId: asset.id,
+          assetTitle: asset.title,
+          assetStorageKey: asset.storageKey,
+          assetPublicUrl: asset.publicUrl,
+          uploadStatus: "saved",
+        });
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : "素材上传失败";
+        updateNodeConfig(nodeId, {
+          uploadStatus: "failed",
+          uploadError: message,
+        });
+        updateNodeData(nodeId, {
+          status: "error",
+          metric: "剧本保存失败",
+          items: ["剧本已导入本地", "资产库保存失败", message],
+        });
+      });
+
+    pendingScriptUploadPositionRef.current = null;
+    if (scriptInputRef.current) scriptInputRef.current.value = "";
+    closeAssetMenu();
+  };
+
   const openVideoPicker = (position?: XYPosition) => {
     pendingReplaceNodeIdRef.current = null;
     pendingUploadPositionRef.current = position ?? null;
@@ -2575,6 +2604,12 @@ function StudioShell() {
     pendingImageUploadPositionRef.current = position;
     closeAssetMenu();
     imageInputRef.current?.click();
+  };
+
+  const openScriptPicker = (position: XYPosition) => {
+    pendingScriptUploadPositionRef.current = position;
+    closeAssetMenu();
+    scriptInputRef.current?.click();
   };
 
   const addVideoStitcherAt = (position: XYPosition) => {
@@ -2770,6 +2805,13 @@ function StudioShell() {
           className="hidden"
           onChange={(event) => handleImage(event.target.files)}
         />
+        <input
+          ref={scriptInputRef}
+          type="file"
+          accept=".txt,.md,.markdown,.srt,.vtt,.csv,.json,text/plain,text/markdown,text/csv,application/json"
+          className="hidden"
+          onChange={(event) => void handleScript(event.target.files?.[0])}
+        />
         <FlowCanvas
           showMiniMap={miniMapVisible}
           showConnections={connectionsVisible}
@@ -2808,6 +2850,7 @@ function StudioShell() {
             position={assetMenu.screenPosition}
             onPickVideo={() => openVideoPicker(assetMenu.flowPosition)}
             onPickImage={() => openImagePicker(assetMenu.flowPosition)}
+            onPickScript={() => openScriptPicker(assetMenu.flowPosition)}
             onAddVideoStitcher={() => addVideoStitcherAt(assetMenu.flowPosition)}
           />
         )}

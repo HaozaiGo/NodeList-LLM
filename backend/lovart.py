@@ -81,8 +81,9 @@ def build_lovart_image_payload(
         raise ValueError("unsupported image count")
 
     refs = [url for url in reference_images or [] if url]
+    image_count_text = "一张" if count == 1 else f"{count}张"
     constraints = [
-        "请立即生成一张真实可下载的图片 artifact，不要只回复文本、脚本或分析。",
+        f"请立即生成{image_count_text}真实可下载的图片 artifact，不要只回复文本、脚本或分析。",
         "请使用 Lovart 图片生成能力生成成图。",
         f"指定图片生成模型：{model}。",
         f"画质：{quality}。",

@@ -20,7 +20,19 @@ router = APIRouter(prefix="/assets", tags=["assets"])
 
 TOKENOPS_BASE_URL = os.getenv("TOKENOPS_BASE_URL", "https://api.tokenops.ai").rstrip("/")
 BDS_PRO_MODEL = "bds-pro"
-BDS_A2_BASE_URL = os.getenv("BDS_A2_BASE_URL", os.getenv("A2_VIDEO_BASE_URL", "https://cu-api.uniphore-ai.com")).rstrip("/")
+BDS_A2_BASE_URL = os.getenv(
+    "MINIMAX_H3_BASE_URL",
+    os.getenv("BDS_A2_BASE_URL", os.getenv("A2_VIDEO_BASE_URL", "https://cu-api.uniphore-ai.com")),
+).rstrip("/")
+SCRIPT_UPLOAD_EXTENSIONS = {".csv", ".json", ".markdown", ".md", ".srt", ".txt", ".vtt"}
+SCRIPT_UPLOAD_MIME_TYPES = {
+    "application/json",
+    "application/x-subrip",
+    "text/csv",
+    "text/markdown",
+    "text/plain",
+    "text/vtt",
+}
 
 
 class FinishedVideoAssetCreate(BaseModel):
@@ -107,10 +119,17 @@ def _ensure_flow_owner(db: Session, flow_id: Optional[str], user: User) -> None:
 
 def _require_supported_upload(file: UploadFile, kind: str) -> None:
     content_type = (file.content_type or "").lower()
+    suffix = os.path.splitext(file.filename or "")[1].lower()
     if kind == "image" and content_type and not content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="请上传图片文件")
     if kind == "video" and content_type and not content_type.startswith("video/"):
         raise HTTPException(status_code=400, detail="请上传视频文件")
+    if kind == "script" and not (
+        content_type.startswith("text/")
+        or content_type in SCRIPT_UPLOAD_MIME_TYPES
+        or suffix in SCRIPT_UPLOAD_EXTENSIONS
+    ):
+        raise HTTPException(status_code=400, detail="请上传文本剧本文件")
 
 
 async def _download_tokenops_video(task_id: str) -> tuple[bytes, str]:
@@ -146,19 +165,32 @@ async def _download_bds_video(task_id: str) -> tuple[bytes, str]:
     remote_id = _bds_task_id(task_id)
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20), follow_redirects=True) as client:
-            result_response = await client.get(f"{BDS_A2_BASE_URL}/result/{remote_id}")
+            result_response = await client.get(f"{BDS_A2_BASE_URL}/api/h3/result/{remote_id}")
+            if result_response.status_code == 404:
+                result_response = await client.get(f"{BDS_A2_BASE_URL}/result/{remote_id}")
             result_response.raise_for_status()
             result = result_response.json()
             output = result.get("output") if isinstance(result.get("output"), dict) else {}
-            url = str(output.get("url") or result.get("url") or "").strip()
+            h3_result = result.get("result") if isinstance(result.get("result"), dict) else {}
+            url = str(
+                h3_result.get("clear_video_url")
+                or result.get("clear_video_url")
+                or output.get("url")
+                or h3_result.get("video_url")
+                or result.get("video_url")
+                or result.get("url")
+                or h3_result.get("original_video_url")
+                or result.get("original_video_url")
+                or ""
+            ).strip()
             if not url:
-                raise HTTPException(status_code=404, detail="Bds Pro 结果未返回视频 URL")
+                raise HTTPException(status_code=404, detail="MiniMax h3 结果未返回视频 URL")
             video_response = await client.get(_absolute_bds_url(url))
             video_response.raise_for_status()
     except HTTPException:
         raise
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Bds Pro 视频下载失败：{exc}") from exc
+        raise HTTPException(status_code=502, detail=f"MiniMax h3 视频下载失败：{exc}") from exc
     return video_response.content, video_response.headers.get("content-type") or "video/mp4"
 
 

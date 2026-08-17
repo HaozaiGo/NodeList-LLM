@@ -425,7 +425,7 @@ function ProductMockup() {
               {[
                 ["Doubao Seed 2.0", "视频分析", "bg-cyan-400/15"],
                 ["Lovart / GPT Image", "图片生成", "bg-violet-400/15"],
-                ["Bds Pro A2", "图生视频", "bg-fuchsia-400/15"],
+                ["MiniMax h3", "图生视频", "bg-fuchsia-400/15"],
               ].map(([name, use, bg]) => (
                 <div key={name} className={cn("mt-2 flex items-center justify-between rounded-full px-3 py-2 text-xs", bg)}>
                   <span className="font-semibold text-white">{name}</span>

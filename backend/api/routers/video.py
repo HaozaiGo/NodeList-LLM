@@ -4,13 +4,12 @@ import re
 import base64
 import subprocess
 import tempfile
-import uuid
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote, urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -35,14 +34,26 @@ TOKENOPS_VIDEO_MODEL = os.getenv(
 VIDEO_SPEC_MODEL = os.getenv("VIDEO_SPEC_MODEL", os.getenv("TEXT_POLISH_MODEL", "doubao-seed-2-0-pro-260215")).strip()
 TOKENOPS_VIDEO_ANALYSIS_MODE = os.getenv("TOKENOPS_VIDEO_ANALYSIS_MODE", "gemini").strip().lower()
 TOKENOPS_GEMINI_MODEL = os.getenv("TOKENOPS_GEMINI_MODEL", "gemini-2.5-flash").strip()
+QWEN_VIDEO_ANALYSIS_MODEL = os.getenv("QWEN_VIDEO_ANALYSIS_MODEL", os.getenv("QWEN_TEXT_MODEL", "qwen3.8-max")).strip()
+QWEN_VIDEO_ANALYSIS_API_KEY = os.getenv("DASHSCOPE_API_KEY", "").strip() or os.getenv("QWEN_API_KEY", "").strip()
+QWEN_COMPATIBLE_BASE_URL = (
+    os.getenv("QWEN_COMPATIBLE_BASE_URL", os.getenv("DASHSCOPE_COMPATIBLE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"))
+    .strip()
+    .rstrip("/")
+)
 TOKENOPS_GENERATION_MODEL = os.getenv("TOKENOPS_GENERATION_MODEL", "doubao-seedance-1-5-pro-251215").strip()
 BDS_PRO_MODEL = "bds-pro"
+MINIMAX_H3_LABEL = "MiniMax h3"
+MINIMAX_H3_WORKFLOW = os.getenv("MINIMAX_H3_WORKFLOW", "h3_r2v_nvfp4_multiparam").strip()
 TOKENOPS_SEEDANCE_15_MODEL = "doubao-seedance-1-5-pro-251215"
 LOVART_VIDEO_PREFIX = "lovart:"
 WAN22_I2V_MODEL = "wan2.2-i2v-spicy"
 WAN27_I2V_MODEL = "wan2.7-i2v-spicy"
 WAN_VIDEO_PREFIX = "wan:"
-BDS_A2_BASE_URL = os.getenv("BDS_A2_BASE_URL", os.getenv("A2_VIDEO_BASE_URL", "https://cu-api.uniphore-ai.com")).rstrip("/")
+BDS_A2_BASE_URL = os.getenv(
+    "MINIMAX_H3_BASE_URL",
+    os.getenv("BDS_A2_BASE_URL", os.getenv("A2_VIDEO_BASE_URL", "https://cu-api.uniphore-ai.com")),
+).rstrip("/")
 MULEROUTER_BASE_URL = os.getenv(
     "MULEROUTER_BASE_URL",
     os.getenv("MULEROUTER_VIDEO_BASE_URL", "https://api.mulerouter.ai"),
@@ -51,7 +62,7 @@ TOKENOPS_GENERATION_MODELS = os.getenv(
     "TOKENOPS_GENERATION_MODELS",
     ",".join(
         [
-            f"{BDS_PRO_MODEL}:Bds Pro",
+            f"{BDS_PRO_MODEL}:{MINIMAX_H3_LABEL}",
             f"{WAN22_I2V_MODEL}:Wan 2.2",
             f"{WAN27_I2V_MODEL}:Wan 2.7",
             "doubao-seedance-1-5-pro-251215:Seedance 1.5 Pro",
@@ -164,7 +175,8 @@ def _video_model_options() -> list[dict[str, str]]:
         model = model.strip()
         if not model or model in seen:
             continue
-        options.append({"model": model, "label": label.strip() or model})
+        display_label = MINIMAX_H3_LABEL if model == BDS_PRO_MODEL else (label.strip() or model)
+        options.append({"model": model, "label": display_label})
         seen.add(model)
 
     if TOKENOPS_GENERATION_MODEL and TOKENOPS_GENERATION_MODEL not in seen:
@@ -273,7 +285,7 @@ def _fallback_video_spec(body: VideoSpecRequest) -> dict[str, Any]:
             for item in body.summaries[:3]
             if item.text.strip()
         )
-    is_bds = body.model == BDS_PRO_MODEL
+    is_h3 = body.model == BDS_PRO_MODEL
     shot_label = "、".join(f"S{value:02d}" for value in target_shots) if target_shots else "自动"
     generation_prompt = "\n".join(
         item
@@ -282,7 +294,7 @@ def _fallback_video_spec(body: VideoSpecRequest) -> dict[str, Any]:
             (
                 f"生成一个连续单镜头图生视频，不要生成整部剧，不要拆成多镜头。画幅 {body.params.ratio}，"
                 f"时长 {body.params.seconds}s，分辨率 {body.params.resolution}。"
-                if is_bds
+                if is_h3
                 else f"生成对应短视频片段。画幅 {body.params.ratio}，时长 {body.params.seconds}s，分辨率 {body.params.resolution}。"
             ),
             f"参考分镜：{_compact_text(selected_rows, 620)}" if selected_rows else "",
@@ -340,7 +352,7 @@ async def _llm_video_spec(body: VideoSpecRequest) -> dict[str, Any]:
         "你是视频生成意图解析器。根据用户输入和上游节点内容，输出严格 JSON，不要 Markdown。"
         "你必须把用户意图转成可直接发给视频生成模型的单段 generation_prompt。"
         "如果用户指定第几段/第几镜头/第几分镜，只抽取对应分镜，不要引用整部剧本。"
-        "Bds Pro 必须输出单镜头图生视频提示词；Seedance/Lovart/Kling/Veo 可输出短片段提示词。"
+        "MiniMax h3 必须输出单镜头图生视频提示词；Seedance/Lovart/Kling/Veo 可输出短片段提示词。"
         "JSON 字段：model, target_shots(number[]), intent_summary, selected_script, generation_prompt, negative_prompt, items(string[])."
     )
     user_content = {
@@ -487,7 +499,7 @@ def _resolve_mulerouter_reference_image(db: Session, user: User, reference: str)
 async def _image_reference_to_data_url(db: Session, user: User, reference: str) -> tuple[str, str]:
     value = reference.strip()
     if not value:
-        raise HTTPException(status_code=400, detail="Bds Pro 需要首帧图片")
+        raise HTTPException(status_code=400, detail="MiniMax h3 需要参考图片")
     if value.startswith("data:image/"):
         return value, "source.png"
     if value.startswith("blob:"):
@@ -509,11 +521,11 @@ async def _image_reference_to_data_url(db: Session, user: User, reference: str) 
             response = await client.get(value)
         response.raise_for_status()
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Bds Pro 首帧图片下载失败：{exc}") from exc
+        raise HTTPException(status_code=502, detail=f"MiniMax h3 参考图片下载失败：{exc}") from exc
 
     mime_type = response.headers.get("content-type") or "image/png"
     if not mime_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Bds Pro 首帧必须是图片")
+        raise HTTPException(status_code=400, detail="MiniMax h3 参考素材必须是图片")
     filename = safe_storage_name(Path(urlparse(value).path).name or "source.png")
     return f"data:{mime_type};base64,{base64.b64encode(response.content).decode()}", filename
 
@@ -537,66 +549,77 @@ def _bds_dimensions(ratio: str, resolution: str) -> tuple[int, int]:
     return width, height
 
 
-async def _bds_upload_image(client: httpx.AsyncClient, data_url: str, filename: str) -> str:
-    response = await client.post(
-        f"{BDS_A2_BASE_URL}/api/upload",
-        json={"image": {"filename": filename, "data_url": data_url}},
-    )
-    if response.status_code >= 400:
-        raise HTTPException(status_code=502, detail=_remote_error(response, "Bds Pro image upload failed"))
-    data = response.json()
-    image = str(data.get("image") or "").strip()
-    if not image:
-        raise HTTPException(status_code=502, detail="Bds Pro 上传首帧后未返回 image")
-    return image
+H3_REFERENCE_ROLES = [
+    "first_frame",
+    "subject_reference",
+    "face_reference",
+    "background_reference",
+    "pose_reference",
+    "last_frame",
+    "style_reference",
+    "reference",
+]
+
+
+def _h3_reference_role(index: int, total: int) -> str:
+    if index == 0:
+        return "first_frame"
+    if total > 2 and index == total - 1:
+        return "last_frame"
+    return H3_REFERENCE_ROLES[index] if index < len(H3_REFERENCE_ROLES) else "reference"
+
+
+async def _h3_reference_images(db: Session, user: User, references: list[str]) -> list[dict[str, str]]:
+    images: list[dict[str, str]] = []
+    total = len(references)
+    for index, reference in enumerate(references):
+        data_url, filename = await _image_reference_to_data_url(db, user, reference)
+        images.append(
+            {
+                "role": _h3_reference_role(index, total),
+                "filename": filename or f"reference_{index + 1}.png",
+                "data_url": data_url,
+            }
+        )
+    return images
 
 
 async def _create_bds_video(payload: VideoGenerateRequest, db: Session, user: User) -> dict[str, Any]:
     references = [item for item in payload.reference_images if item.strip()]
     if not references:
-        raise HTTPException(status_code=400, detail="Bds Pro 图生视频需要至少一张上游图片作为首帧")
-
-    first_frame, first_filename = await _image_reference_to_data_url(db, user, references[0])
-    face_frame: Optional[tuple[str, str]] = None
-    if len(references) > 1:
-        face_frame = await _image_reference_to_data_url(db, user, references[1])
+        raise HTTPException(status_code=400, detail="MiniMax h3 图生视频需要至少一张上游图片作为首帧")
 
     width, height = _bds_dimensions(payload.ratio, payload.resolution)
+    images = await _h3_reference_images(db, user, references)
     request_payload: dict[str, Any] = {
-        "positive_prompt": payload.prompt.strip(),
-        "negative_prompt": "blurry, out of focus, bad anatomy, extra limbs, duplicate person, watermark, text, logo",
+        "workflow": MINIMAX_H3_WORKFLOW,
+        "prompt": payload.prompt.strip(),
+        "mode": "r2v",
         "seconds": payload.seconds,
-        "steps": 13,
-        "cfg": 1.0,
-        "shift": 5.0,
-        "painter": 1.03,
-        "lynx": 0.04 if face_frame else 0,
         "width": width,
         "height": height,
-        "frame_rate": 16.2,
-        "crf": 10,
+        "steps": 25,
+        "cfg": 1.0,
+        "shift_video": 10.5,
         "seed": -1,
-        "postprocess": {"speech": "auto", "blush": "auto"},
+        "images": images,
     }
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=20)) as client:
-            request_payload["image"] = await _bds_upload_image(client, first_frame, first_filename)
-            if face_frame:
-                request_payload["face_image"] = await _bds_upload_image(client, face_frame[0], face_frame[1])
             response = await client.post(f"{BDS_A2_BASE_URL}/api/generate", json=request_payload)
     except httpx.TimeoutException as exc:
-        raise HTTPException(status_code=504, detail="Bds Pro 视频生成任务创建超时，请稍后重试") from exc
+        raise HTTPException(status_code=504, detail="MiniMax h3 视频生成任务创建超时，请稍后重试") from exc
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Bds Pro 视频生成请求失败：{exc}") from exc
+        raise HTTPException(status_code=502, detail=f"MiniMax h3 视频生成请求失败：{exc}") from exc
 
     if response.status_code >= 400:
-        raise HTTPException(status_code=502, detail=_remote_error(response, "Bds Pro video generation failed"))
+        raise HTTPException(status_code=502, detail=_remote_error(response, "MiniMax h3 video generation failed"))
 
     result = response.json()
     task_id = str(result.get("task_id") or result.get("id") or "").strip()
     if not task_id:
-        task_id = uuid.uuid4().hex
+        raise HTTPException(status_code=502, detail="MiniMax h3 未返回任务 ID")
     return {
         **result,
         "id": f"{BDS_PRO_MODEL}:{task_id}",
@@ -604,11 +627,13 @@ async def _create_bds_video(payload: VideoGenerateRequest, db: Session, user: Us
         "status": result.get("state") or result.get("status") or "queued",
         "request": {
             "model": BDS_PRO_MODEL,
+            "workflow": MINIMAX_H3_WORKFLOW,
             "ratio": payload.ratio,
             "resolution": payload.resolution,
             "seconds": payload.seconds,
             "width": width,
             "height": height,
+            "reference_image_count": len(images),
         },
     }
 
@@ -662,8 +687,8 @@ def _bds_error_detail(data: dict[str, Any]) -> str:
     if isinstance(raw_error, str) and raw_error.strip() and not raw_error.strip().startswith(("{", "[")):
         return raw_error.strip()
     if status := data.get("status"):
-        return f"Bds Pro 返回状态：{status}"
-    return "Bds Pro 生成失败，未返回详细错误"
+        return f"MiniMax h3 返回状态：{status}"
+    return "MiniMax h3 生成失败，未返回详细错误"
 
 
 def _absolute_bds_url(value: str) -> str:
@@ -716,9 +741,11 @@ def _extract_video_urls(data: Any) -> list[str]:
 
 async def _get_bds_result(task_id: str) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=20), follow_redirects=True) as client:
-        response = await client.get(f"{BDS_A2_BASE_URL}/result/{task_id}")
+        response = await client.get(f"{BDS_A2_BASE_URL}/api/h3/result/{task_id}")
+        if response.status_code == 404:
+            response = await client.get(f"{BDS_A2_BASE_URL}/result/{task_id}")
     if response.status_code >= 400:
-        raise HTTPException(status_code=502, detail=_remote_error(response, "Bds Pro result failed"))
+        raise HTTPException(status_code=502, detail=_remote_error(response, "MiniMax h3 result failed"))
     data = response.json()
     return data if isinstance(data, dict) else {}
 
@@ -727,14 +754,16 @@ async def _get_bds_status(video_id: str) -> dict[str, Any]:
     task_id = _bds_task_id(video_id)
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=20), follow_redirects=True) as client:
-            response = await client.get(f"{BDS_A2_BASE_URL}/status/{task_id}")
+            response = await client.get(f"{BDS_A2_BASE_URL}/api/h3/status/{task_id}")
+            if response.status_code == 404:
+                response = await client.get(f"{BDS_A2_BASE_URL}/status/{task_id}")
     except httpx.TimeoutException as exc:
-        raise HTTPException(status_code=504, detail="Bds Pro 状态查询超时，请稍后重试") from exc
+        raise HTTPException(status_code=504, detail="MiniMax h3 状态查询超时，请稍后重试") from exc
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Bds Pro 状态查询失败：{exc}") from exc
+        raise HTTPException(status_code=502, detail=f"MiniMax h3 状态查询失败：{exc}") from exc
 
     if response.status_code >= 400:
-        raise HTTPException(status_code=502, detail=_remote_error(response, "Bds Pro status failed"))
+        raise HTTPException(status_code=502, detail=_remote_error(response, "MiniMax h3 status failed"))
 
     data = response.json()
     if not isinstance(data, dict):
@@ -766,16 +795,27 @@ async def _download_bds_video(video_id: str) -> tuple[bytes, str]:
     task_id = _bds_task_id(video_id)
     result = await _get_bds_result(task_id)
     output = result.get("output") if isinstance(result.get("output"), dict) else {}
+    h3_result = result.get("result") if isinstance(result.get("result"), dict) else {}
     urls = _extract_video_urls(result)
-    url = str(output.get("url") or result.get("url") or (urls[0] if urls else "")).strip()
+    url = str(
+        h3_result.get("clear_video_url")
+        or result.get("clear_video_url")
+        or output.get("url")
+        or h3_result.get("video_url")
+        or result.get("video_url")
+        or result.get("url")
+        or h3_result.get("original_video_url")
+        or result.get("original_video_url")
+        or (urls[0] if urls else "")
+    ).strip()
     if not url:
-        raise HTTPException(status_code=404, detail="Bds Pro 结果未返回视频 URL")
+        raise HTTPException(status_code=404, detail="MiniMax h3 结果未返回视频 URL")
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20), follow_redirects=True) as client:
             response = await client.get(_absolute_bds_url(url))
         response.raise_for_status()
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Bds Pro 视频下载失败：{exc}") from exc
+        raise HTTPException(status_code=502, detail=f"MiniMax h3 视频下载失败：{exc}") from exc
     return response.content, response.headers.get("content-type") or "video/mp4"
 
 
@@ -1512,6 +1552,95 @@ async def _chat_completion(client: httpx.AsyncClient, key: str, video_url: str) 
     return response
 
 
+def _is_qwen_analysis_model(model: str) -> bool:
+    return model == QWEN_VIDEO_ANALYSIS_MODEL or model.startswith("qwen")
+
+
+def _chat_completions_url(base_url: str) -> str:
+    return f"{base_url.rstrip('/')}/chat/completions"
+
+
+def _qwen_analysis_headers() -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {QWEN_VIDEO_ANALYSIS_API_KEY}",
+        "Content-Type": "application/json",
+        "X-DashScope-DataInspection": '{"input":"disable","output":"disable"}',
+    }
+
+
+async def _analyze_frames_with_qwen(
+    client: httpx.AsyncClient,
+    model: str,
+    frames: list[dict[str, Any]],
+    duration: float,
+    segments: list[dict[str, Any]],
+    transcript: dict[str, Any],
+) -> dict[str, Any]:
+    if not QWEN_VIDEO_ANALYSIS_API_KEY:
+        raise HTTPException(status_code=500, detail="DASHSCOPE_API_KEY 或 QWEN_API_KEY 未配置")
+
+    segment_lines = "\n".join(
+        f"{segment['id']}: {segment['start']:.1f}s-{segment['end']:.1f}s"
+        for segment in segments
+    )
+    frame_lines = "\n".join(
+        f"F{frame['index']}: {frame['segment_id']} @ {frame['timestamp']:.1f}s"
+        for frame in frames
+    )
+    transcript_text = str(transcript.get("text") or "").strip()
+    transcript_status = str(transcript.get("status") or "empty")
+    transcript_error = str(transcript.get("error") or "").strip()
+    content: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": (
+                f"{VIDEO_ANALYSIS_PROMPT}\n"
+                f"视频总时长约 {duration:.1f}s。\n"
+                f"分段：\n{segment_lines}\n"
+                f"关键帧映射：\n{frame_lines}\n"
+                f"音频转写状态：{transcript_status}\n"
+                f"音频转写错误：{transcript_error or '无'}\n"
+                f"音频转写文本：{transcript_text or '无可用转写文本'}"
+            ),
+        }
+    ]
+    for frame in frames:
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": _image_data_url(frame["data"]),
+                    "detail": "high",
+                },
+            }
+        )
+
+    try:
+        response = await client.post(
+            _chat_completions_url(QWEN_COMPATIBLE_BASE_URL),
+            headers=_qwen_analysis_headers(),
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "你只输出合法 JSON。"},
+                    {"role": "user", "content": content},
+                ],
+                "temperature": 0.2,
+                "max_completion_tokens": 6000,
+                "response_format": {"type": "json_object"},
+                "enable_thinking": False,
+            },
+        )
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="Qwen 视频分析超时，请稍后重试或换更短视频") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Qwen 视频分析请求失败：{exc}") from exc
+
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail=_remote_error(response, "Qwen video analysis failed"))
+    return response.json()
+
+
 async def _analyze_frames(
     client: httpx.AsyncClient,
     key: str,
@@ -2057,6 +2186,7 @@ async def download_generated_video(
 @router.post("/analyze")
 async def analyze_video(
     file: UploadFile = File(...),
+    model: str = Form("doubao"),
     _: User = Depends(get_current_user),
 ):
     _require_video(file)
@@ -2067,6 +2197,38 @@ async def analyze_video(
 
     filename = file.filename or "video.mp4"
     content_type = file.content_type or "application/octet-stream"
+    selected_model = (model or "doubao").strip()
+
+    if _is_qwen_analysis_model(selected_model):
+        prepared = _prepare_video_analysis(data, filename)
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20)) as client:
+            transcript = await _transcribe_audio(client, key, prepared["audio"])
+            completion = await _analyze_frames_with_qwen(
+                client,
+                selected_model,
+                prepared["frames"],
+                prepared["duration"],
+                prepared["segments"],
+                transcript,
+            )
+
+        content = _choice_content(completion)
+        if not content:
+            raise HTTPException(status_code=502, detail="Qwen returned an empty analysis")
+
+        analysis = _parse_analysis(content)
+        _ensure_report(analysis, prepared["duration"], prepared["segments"], transcript)
+        return {
+            "model": selected_model,
+            "provider": "qwen_frames",
+            "file_uri": "",
+            "mime_type": content_type,
+            "content": content,
+            "duration": prepared["duration"],
+            "segments": prepared["segments"],
+            "transcript": transcript,
+            **analysis,
+        }
 
     if TOKENOPS_VIDEO_ANALYSIS_MODE == "gemini":
         duration = _probe_duration_from_bytes(data, filename)

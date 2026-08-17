@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import AsyncIterator
 from typing import Any, Optional
@@ -14,6 +15,7 @@ from auth import get_current_user
 from models import User
 
 router = APIRouter(prefix="/text", tags=["text"])
+logger = logging.getLogger("uvicorn.error")
 
 TOKENOPS_BASE_URL = os.getenv("TOKENOPS_BASE_URL", "https://api.tokenops.ai").rstrip("/")
 ARK_API_KEY = os.getenv("ARK_API_KEY", "").strip()
@@ -134,6 +136,59 @@ def _auth_headers(api_key: str) -> dict[str, str]:
     }
 
 
+def _provider_headers(model: str, api_key: str) -> dict[str, str]:
+    headers = _auth_headers(api_key)
+    if _is_qwen_model(model):
+        headers["X-DashScope-DataInspection"] = '{"input":"disable","output":"disable"}'
+    return headers
+
+
+def _safe_headers(headers: dict[str, str]) -> dict[str, str]:
+    return {
+        key: "<redacted>" if key.lower() == "authorization" else value
+        for key, value in headers.items()
+    }
+
+
+def _log_provider_request(
+    *,
+    model: str,
+    base_url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    request_mode: str,
+) -> None:
+    if not _is_qwen_model(model):
+        return
+    logger.info(
+        "Qwen text API request mode=%s url=%s headers=%s payload=%s",
+        request_mode,
+        _chat_completions_url(base_url),
+        json.dumps(_safe_headers(headers), ensure_ascii=False),
+        json.dumps(payload, ensure_ascii=False),
+    )
+
+
+def _provider_request_id(response: httpx.Response) -> str:
+    for header in ("x-request-id", "x-dashscope-request-id", "request-id"):
+        value = response.headers.get(header)
+        if value:
+            return value
+    return ""
+
+
+def _log_provider_response_id(*, model: str, response: httpx.Response, request_mode: str) -> None:
+    if not _is_qwen_model(model):
+        return
+    request_id = _provider_request_id(response)
+    logger.info(
+        "Qwen text API response mode=%s status=%s request_id=%s",
+        request_mode,
+        response.status_code,
+        request_id or "<missing>",
+    )
+
+
 def _stream_delta_content(line: str) -> str:
     if not line.startswith("data:"):
         return ""
@@ -194,9 +249,12 @@ async def _complete_text(body: TextGenerateRequest, model: str) -> str:
         raise TextGenerateError(missing_message)
 
     payload = _build_provider_payload(body, model=model, stream=False)
+    headers = _provider_headers(model, api_key)
+    _log_provider_request(model=model, base_url=base_url, headers=headers, payload=payload, request_mode="complete")
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(TEXT_COMPLETE_TIMEOUT_SECONDS, connect=20)) as client:
-            response = await client.post(_chat_completions_url(base_url), headers=_auth_headers(api_key), json=payload)
+            response = await client.post(_chat_completions_url(base_url), headers=headers, json=payload)
+            _log_provider_response_id(model=model, response=response, request_mode="complete")
             try:
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
@@ -217,6 +275,8 @@ async def _stream_text(body: TextGenerateRequest, model: str) -> AsyncIterator[s
         raise TextGenerateError(missing_message)
 
     payload = _build_provider_payload(body, model=model, stream=True)
+    headers = _provider_headers(model, api_key)
+    _log_provider_request(model=model, base_url=base_url, headers=headers, payload=payload, request_mode="stream")
     saw_content = False
     try:
         timeout = httpx.Timeout(
@@ -230,9 +290,10 @@ async def _stream_text(body: TextGenerateRequest, model: str) -> AsyncIterator[s
             async with client.stream(
                 "POST",
                 _chat_completions_url(base_url),
-                headers=_auth_headers(api_key),
+                headers=headers,
                 json=payload,
             ) as response:
+                _log_provider_response_id(model=model, response=response, request_mode="stream")
                 try:
                     response.raise_for_status()
                 except httpx.HTTPStatusError as exc:

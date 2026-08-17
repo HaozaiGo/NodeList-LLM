@@ -460,9 +460,10 @@ export async function uploadAsset(payload: UploadAssetPayload): Promise<AssetRec
   return readJsonOrThrow<AssetRecord>(r, "素材上传失败");
 }
 
-export async function analyzeVideo(file: File): Promise<VideoAnalysisResponse> {
+export async function analyzeVideo(file: File, model = "doubao"): Promise<VideoAnalysisResponse> {
   const body = new FormData();
   body.append("file", file);
+  body.append("model", model);
   const r = await fetchWithAuthRetry(`${BASE}/api/video/analyze`, {
     method: "POST",
     body,

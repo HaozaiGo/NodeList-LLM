@@ -50,6 +50,7 @@ interface FlowState {
   addVideoUploadNode: (fileName: string, position: XYPosition, videoUrl?: string, file?: File) => void;
   addVideoStitcherNode: (position: XYPosition) => string;
   addImageUploadNode: (images: ImageAssetItem[], position: XYPosition) => string;
+  addScriptUploadNode: (fileName: string, content: string, position: XYPosition) => string;
   appendImagesToNode: (nodeId: string, images: ImageAssetItem[]) => void;
   updateImageAsset: (nodeId: string, imageId: string, patch: Partial<ImageAssetItem>) => void;
   removeImageFromNode: (nodeId: string, imageId: string) => void;
@@ -57,13 +58,13 @@ interface FlowState {
   setPrimaryImage: (nodeId: string, imageId: string) => void;
   setImageTag: (nodeId: string, imageId: string, tag: ImageAssetTag) => void;
   setGeneratedImageAssetTag: (nodeId: string, tag: Exclude<ImageAssetTag, "reference">) => void;
-  addReferencedNode: (sourceNodeId: string, kind: "text" | "image" | "video", position: XYPosition) => void;
+  addReferencedNode: (sourceNodeId: string, kind: "text" | "image" | "video" | "analysis", position: XYPosition) => void;
   replaceVideoUploadNode: (nodeId: string, fileName: string, videoUrl?: string, file?: File) => void;
   addDoubaoAnalysisNode: (sourceNodeId: string) => void;
   resetToVideoMvp: () => void;
   ensureVideoMvp: () => void;
   markVideoUploaded: (fileName: string, videoUrl?: string, file?: File) => void;
-  runDoubaoAnalysis: (sourceNodeId?: string) => Promise<void>;
+  runDoubaoAnalysis: (sourceNodeId?: string, model?: string, targetNodeId?: string) => Promise<void>;
   runTextGeneration: (nodeId: string, promptText?: string, model?: string) => Promise<void>;
   runImageGeneration: (nodeId: string, payload: ImageGeneratePayload) => Promise<void>;
   runSeedanceGeneration: (sourceAnalysisNodeId: string, payload: VideoGeneratePayload) => Promise<void>;
@@ -81,6 +82,7 @@ interface FlowState {
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let uploadNodeCounter = 1;
 let imageNodeCounter = 1;
+let scriptNodeCounter = 1;
 let doubaoNodeCounter = 1;
 let seedanceNodeCounter = 1;
 let stitcherNodeCounter = 1;
@@ -194,6 +196,22 @@ function imageGroupItems(images: ImageAssetItem[]) {
     "分类为人物 / 场景 / 道具",
     "生成参考资产",
   ];
+}
+
+function scriptUploadMetric(content: string) {
+  const text = content.trim();
+  const lineCount = text ? text.split(/\r?\n/).filter((line) => line.trim()).length : 0;
+  return `${text.length} 字 / ${lineCount} 行`;
+}
+
+function scriptUploadItems(content: string) {
+  const snippets = content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 3)
+    .map((line) => (line.length > 32 ? `${line.slice(0, 32)}...` : line));
+  return snippets.length > 0 ? snippets : ["剧本已上传", "可连接到生成节点", "可编辑剧本"];
 }
 
 function normalizeImageAssetTag(value: unknown): Exclude<ImageAssetTag, "reference"> {
@@ -598,6 +616,11 @@ function textGenerationModelLabel(model?: string) {
   return model;
 }
 
+function videoAnalysisModelLabel(model?: string) {
+  if (model === "qwen3.8-max" || model?.startsWith("qwen")) return "Qwen3.8-Max";
+  return "豆包视频分析";
+}
+
 function sourceContextForTextNode(nodes: Node<NodeData>[], edges: Edge[], nodeId: string) {
   const sourceNodes = edges
     .filter((edge) => edge.target === nodeId)
@@ -712,6 +735,7 @@ function createDoubaoNode(sourceNode: Node<NodeData>, targetId: string): Node<No
       config: {
         sourceNodeId: sourceNode.id,
         fileName: sourceNode.data.config.fileName,
+        analysisModel: "doubao",
         shots: 0,
         characters: 0,
         props: 0,
@@ -763,7 +787,7 @@ function createSeedanceNode(
 
 function videoModelLabel(model: string): string {
   const labels: Record<string, string> = {
-    "bds-pro": "Bds Pro",
+    "bds-pro": "MiniMax h3",
     "wan2.2-i2v-spicy": "Wan 2.2",
     "wan2.7-i2v-spicy": "Wan 2.7",
     "doubao-seedance-1-5-pro-251215": "Seedance 1.5 Pro",
@@ -981,6 +1005,34 @@ export const useFlowStore = create<FlowState>((set, get) => ({
     return id;
   },
 
+  addScriptUploadNode: (fileName, content, position) => {
+    const id = `script-source-${Date.now()}-${scriptNodeCounter++}`;
+    const node: Node<NodeData> = {
+      id,
+      type: "storyboardScript",
+      position,
+      data: {
+        label: "上传剧本",
+        description: "导入已有剧本文本，作为分镜、图片和视频生成依据。",
+        metric: scriptUploadMetric(content),
+        status: "done",
+        accent: "#F59E0B",
+        config: {
+          sourceType: "upload",
+          fileName,
+          script: content,
+          content,
+          assetType: "script",
+          uploadStatus: "uploading",
+        },
+        items: scriptUploadItems(content),
+      },
+    };
+    set({ nodes: [...get().nodes, node] });
+    scheduleAutoSave(get);
+    return id;
+  },
+
   appendImagesToNode: (nodeId, images) => {
     const currentNode = get().nodes.find((node) => node.id === nodeId);
     if (!currentNode || currentNode.type !== "imageUpload") return;
@@ -1155,6 +1207,28 @@ export const useFlowStore = create<FlowState>((set, get) => ({
           items: ["等待生成视频", "参考上游素材", "可加入制作资产"],
         },
       },
+      analysis: {
+        id,
+        type: "doubaoAnalysis",
+        position,
+        data: {
+          label: "视频分析",
+          description: "引用源视频，拆解镜头、人物、场景、动作和情绪节奏。",
+          metric: "选择模型 / ready",
+          status: "ready",
+          accent: "#41D9FF",
+          config: {
+            sourceNodeId,
+            sourceLabel: sourceNode.data.label,
+            analysisModel: "doubao",
+            fileName: sourceNode.data.config.fileName,
+            shots: 0,
+            characters: 0,
+            props: 0,
+          },
+          items: ["视频分析", "模型：豆包分析", "引用源视频"],
+        },
+      },
     };
     const edge: Edge = {
       id: `e-${sourceNodeId}-${id}`,
@@ -1304,12 +1378,18 @@ export const useFlowStore = create<FlowState>((set, get) => ({
     scheduleAutoSave(get);
   },
 
-  runDoubaoAnalysis: async (sourceNodeId) => {
+  runDoubaoAnalysis: async (sourceNodeId, model, targetNodeId) => {
     const current = get();
     const sourceNode =
       (sourceNodeId ? current.nodes.find((node) => node.id === sourceNodeId) : undefined) ??
       current.nodes.find((node) => node.type === "videoUpload");
     if (!sourceNode) return;
+    const targetNode = targetNodeId ? current.nodes.find((node) => node.id === targetNodeId) : undefined;
+    const analysisModel =
+      model?.trim() ||
+      (typeof targetNode?.data.config.analysisModel === "string" ? targetNode.data.config.analysisModel : "") ||
+      "doubao";
+    const analysisModelLabel = videoAnalysisModelLabel(analysisModel);
 
     let file: File | undefined = current.videoFiles[sourceNode.id];
     if (!file) {
@@ -1326,7 +1406,10 @@ export const useFlowStore = create<FlowState>((set, get) => ({
       set({ videoFiles: { ...get().videoFiles, [sourceNode.id]: file } });
       void storeVideoFile(sourceNode.id, file);
     }
-    let targetId = findDoubaoTargetId(current.nodes, current.edges, sourceNode.id);
+    let targetId =
+      targetNode?.type === "doubaoAnalysis"
+        ? targetNode.id
+        : findDoubaoTargetId(current.nodes, current.edges, sourceNode.id);
     let nodes = current.nodes;
     let edges = current.edges;
     if (!targetId) {
@@ -1352,7 +1435,8 @@ export const useFlowStore = create<FlowState>((set, get) => ({
           [targetId]: {
             status: "ready",
             metric: "等待上传视频",
-        items: ["请先上传本地视频", "上传后再点击视频分析"],
+            config: { analysisModel },
+            items: ["请先上传本地视频", "上传后再点击视频分析"],
           },
         }),
         edges,
@@ -1370,7 +1454,8 @@ export const useFlowStore = create<FlowState>((set, get) => ({
         [sourceNode.id]: { items: sourceItems },
         [targetId]: {
           status: "running",
-          metric: "视频理解",
+          metric: `${analysisModelLabel} / analyzing`,
+          config: { analysisModel },
           items: doubaoProgressItems(0),
         },
       }),
@@ -1398,7 +1483,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
     doubaoProgressTimers.set(targetId, progressTimer);
 
     try {
-      const result = await analyzeVideo(file);
+      const result = await analyzeVideo(file, analysisModel);
       clearDoubaoProgress(targetId);
       const scenes = result.scenes.length ? result.scenes.length : 0;
       const analysisItems = result.items.length
@@ -1420,9 +1505,10 @@ export const useFlowStore = create<FlowState>((set, get) => ({
         nodes: patchNodes(get().nodes, {
           [targetId]: {
             status: "done",
-            metric: `${result.shots || 0} shots / ${result.characters || 0} characters / ${result.props || 0} props`,
+            metric: `${videoAnalysisModelLabel(result.model)} / ${result.shots || 0} shots`,
             config: {
               model: result.model,
+              analysisModel,
               shots: result.shots,
               characters: result.characters,
               props: result.props,

@@ -26,6 +26,7 @@ from storage import object_key_for_asset, safe_storage_name, storage
 router = APIRouter(prefix="/image", tags=["image"])
 
 DEFAULT_LOVART_IMAGE_MODEL = os.getenv("LOVART_IMAGE_MODEL", "gpt-image-2")
+LOVART_IMAGE_BATCH_PREFIX = "lovart-batch:"
 
 
 class ImageGenerateRequest(BaseModel):
@@ -63,6 +64,17 @@ class ImageGenerationStatus(BaseModel):
     assets: list[ImageAssetOut] = Field(default_factory=list)
     error: Optional[str] = None
     raw: dict[str, Any] = Field(default_factory=dict)
+
+
+def _image_batch_id(task_ids: list[str]) -> str:
+    return f"{LOVART_IMAGE_BATCH_PREFIX}{','.join(task_ids)}"
+
+
+def _image_batch_task_ids(task_id: str) -> list[str]:
+    if not task_id.startswith(LOVART_IMAGE_BATCH_PREFIX):
+        return [task_id]
+    raw = task_id[len(LOVART_IMAGE_BATCH_PREFIX):]
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 def _ensure_flow_owner(db: Session, flow_id: Optional[str], user: User) -> None:
@@ -208,28 +220,37 @@ async def generate_image(
 ):
     _ensure_flow_owner(db, payload.flowId, user)
     model = _select_image_model(payload.model)
+    if payload.count not in {1, 2, 4}:
+        raise HTTPException(status_code=400, detail="unsupported image count")
     try:
         reference_images = _resolve_reference_images(db, user, payload.reference_images)
-        request = build_lovart_image_payload(
-            model=model,
-            prompt=payload.prompt,
-            ratio=payload.ratio,
-            resolution=payload.resolution,
-            quality=payload.quality,
-            count=payload.count,
-            reference_images=reference_images,
-        )
-        result = await LovartClient().create_task(request)
+        client = LovartClient()
+        results = []
+        for index in range(max(1, payload.count)):
+            prompt = payload.prompt
+            if payload.count > 1:
+                prompt = f"{payload.prompt}\n\n本次是批量生成第 {index + 1}/{payload.count} 张，请生成一张独立结果，保持同一要求但允许自然差异。"
+            request = build_lovart_image_payload(
+                model=model,
+                prompt=prompt,
+                ratio=payload.ratio,
+                resolution=payload.resolution,
+                quality=payload.quality,
+                count=1,
+                reference_images=reference_images,
+            )
+            results.append(await client.create_task(request))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LovartAPIError as exc:
         raise _map_lovart_error(exc) from exc
 
+    task_ids = [result.task_id for result in results]
     return ImageGenerateResponse(
-        id=result.task_id,
+        id=_image_batch_id(task_ids) if len(task_ids) > 1 else task_ids[0],
         model=model,
         status="running",
-        projectId=result.request_id,
+        projectId=results[0].request_id if results else None,
     )
 
 
@@ -243,17 +264,42 @@ async def get_image_generation_status(
     user: User = Depends(get_current_user),
 ):
     _ensure_flow_owner(db, flowId, user)
-    try:
-        task = await LovartClient().get_task(task_id)
-    except LovartAPIError as exc:
-        raise _map_lovart_error(exc) from exc
+    client = LovartClient()
+    task_ids = _image_batch_task_ids(task_id)
+    tasks: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for child_task_id in task_ids:
+        try:
+            tasks.append(await client.get_task(child_task_id))
+        except LovartAPIError as exc:
+            errors.append(exc.detail)
 
-    image_urls = extract_image_urls(task)
-    status = _normalize_status(task.get("status"), image_urls)
-    error = None
-    if status == "running" and str(task.get("status") or "").lower() in {"done", "completed", "complete", "success", "succeeded"}:
-        error = _lovart_text_message(task) or "Lovart 已完成但未返回图片结果"
+    image_urls: list[str] = []
+    child_statuses: list[str] = []
+    for task in tasks:
+        task_image_urls = extract_image_urls(task)
+        image_urls.extend(task_image_urls[:1] if len(task_ids) > 1 else task_image_urls)
+        child_status = _normalize_status(task.get("status"), task_image_urls)
+        if child_status == "running" and str(task.get("status") or "").lower() in {"done", "completed", "complete", "success", "succeeded"}:
+            errors.append(_lovart_text_message(task) or "Lovart 已完成但未返回图片结果")
+            child_status = "failed"
+        child_statuses.append(child_status)
+
+    seen_urls: set[str] = set()
+    image_urls = [url for url in image_urls if not (url in seen_urls or seen_urls.add(url))]
+    if errors and not tasks:
+        raise _map_lovart_error(LovartAPIError(502, errors[0]))
+    if child_statuses and all(status == "completed" for status in child_statuses):
+        status = "completed"
+    elif child_statuses and all(status == "failed" for status in child_statuses):
         status = "failed"
+    elif child_statuses and not any(status == "running" for status in child_statuses):
+        status = "failed"
+    elif errors and not child_statuses:
+        status = "failed"
+    else:
+        status = "running"
+    error = "；".join(errors) if status == "failed" and errors else None
     assets = []
     if status == "completed" and image_urls:
         assets = await _save_lovart_images(
@@ -273,5 +319,5 @@ async def get_image_generation_status(
         imageUrls=image_urls,
         assets=assets,
         error=error,
-        raw=task,
+        raw={"tasks": tasks, "errors": errors},
     )

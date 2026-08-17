@@ -6,8 +6,10 @@ import { Handle, Position, type Edge, type Node, type NodeProps } from "@xyflow/
 import {
   Boxes,
   BrainCircuit,
+  ChevronDown,
   Building2,
   ChevronRight,
+  ChevronUp,
   Clapperboard,
   Check,
   Clock3,
@@ -18,8 +20,10 @@ import {
   ImagePlus,
   Captions,
   Library,
+  Link2,
   MapPin,
   MessageSquareText,
+  Monitor,
   Music2,
   PackageCheck,
   Pencil,
@@ -35,7 +39,19 @@ import {
 import type { ImageAssetItem, ImageAssetTag, NodeData, NodeType, StudioNodeStatus } from "@/types/flow";
 import { cn } from "@/lib/utils";
 import { useFlowStore } from "@/stores/flowStore";
-import { downloadGeneratedVideo, resolveMediaUrl, type VideoGeneratePayload } from "@/lib/api";
+import { downloadGeneratedVideo, listVideoModels, resolveMediaUrl, type VideoGeneratePayload, type VideoModelOption } from "@/lib/api";
+import {
+  fallbackVideoModels,
+  modelLabel,
+  normalizeVideoModelOptions,
+  normalizeVideoParamsForModel,
+  videoModelMeta,
+  videoModes,
+  videoRatios,
+  videoResolutions,
+  videoSeconds,
+  type VideoGenerationParams,
+} from "@/lib/videoGenerationOptions";
 
 const iconMap: Partial<Record<NodeType, React.ComponentType<{ className?: string }>>> = {
   videoUpload: FileVideo,
@@ -77,6 +93,15 @@ const imageTagLabel: Record<ImageAssetTag, string> = {
 
 const imageTagOptions = Object.entries(imageTagLabel) as Array<[ImageAssetTag, string]>;
 type GeneratedAssetTag = Exclude<ImageAssetTag, "reference">;
+
+const videoAnalysisModelOptions = [
+  { model: "doubao", label: "豆包分析" },
+  { model: "qwen3.8-max", label: "Qwen3.8-Max" },
+];
+
+function videoAnalysisModelLabel(model: unknown) {
+  return model === "qwen3.8-max" ? "Qwen3.8-Max" : "豆包分析";
+}
 
 const generatedAssetOptions: Array<{
   value: GeneratedAssetTag;
@@ -131,6 +156,7 @@ interface SegmentReport {
 }
 
 type ReplacementKind = "character" | "scene" | "prop";
+type ReplacementReferenceImagesByKind = Record<ReplacementKind, string[]>;
 
 interface ReplacementAsset {
   id: string;
@@ -138,18 +164,13 @@ interface ReplacementAsset {
   label: string;
 }
 
-interface GenerationParams {
-  ratio: string;
-  resolution: string;
-  seconds: number;
+const replacementReferenceOrder: ReplacementKind[] = ["scene", "character", "prop"];
+
+type ReplacementGenerationParams = VideoGenerationParams & {
   generate_audio: boolean;
   watermark: boolean;
   camerafixed: boolean;
-}
-
-const generationRatios = ["9:16", "16:9", "1:1", "3:4", "4:3", "21:9"];
-const generationResolutions = ["720p", "1080p", "480p"];
-const generationSeconds = [4, 6, 8, 10, 12];
+};
 
 function displayNodeLabel(label: string) {
   return label === "豆包视频分析" ? "视频分析" : label;
@@ -203,6 +224,50 @@ function imageDisplayUrl(image: ImageAssetItem | null) {
   if (!image) return "";
   if (image.assetId) return resolveMediaUrl(`/api/assets/${image.assetId}/public-content`);
   return resolveMediaUrl(image.url);
+}
+
+function emptyReplacementReferenceImages(): ReplacementReferenceImagesByKind {
+  return { scene: [], character: [], prop: [] };
+}
+
+function replacementKindFromNode(node: Node<NodeData>): ReplacementKind | null {
+  const assetTag = node.data.config.assetTag;
+  if (assetTag === "scene" || assetTag === "character" || assetTag === "prop") return assetTag;
+  if (node.type === "sceneAsset") return "scene";
+  if (node.type === "characterAsset") return "character";
+  if (node.type === "propAsset") return "prop";
+  return null;
+}
+
+function usableImageReference(url: string) {
+  const value = url.trim();
+  return value && !value.startsWith("blob:");
+}
+
+function pushUniqueReference(target: string[], seen: Set<string>, url: string) {
+  if (!usableImageReference(url) || seen.has(url)) return;
+  seen.add(url);
+  target.push(url);
+}
+
+function collectReplacementReferenceImages(nodes: Node<NodeData>[]): ReplacementReferenceImagesByKind {
+  const refs = emptyReplacementReferenceImages();
+  const seen = new Set<string>();
+
+  nodes.forEach((node) => {
+    if (!["imageUpload", "sceneAsset", "characterAsset", "propAsset"].includes(String(node.type))) return;
+    const fallbackKind = replacementKindFromNode(node);
+    const images = getImageItems(node.data.config);
+    images.forEach((image) => {
+      const kind = image.tag === "scene" || image.tag === "character" || image.tag === "prop"
+        ? image.tag
+        : fallbackKind;
+      if (!kind) return;
+      pushUniqueReference(refs[kind], seen, imageDisplayUrl(image));
+    });
+  });
+
+  return refs;
 }
 
 type StitcherClip = {
@@ -380,13 +445,15 @@ function getReplacementAssets(
 function buildGenerationPrompt(
   report: AnalysisReport,
   customizeText: string,
-  params: GenerationParams,
+  params: ReplacementGenerationParams,
   replacedCount: number,
   totalCount: number
 ) {
   const requirements = customizeText.trim() || "保持原视频叙事结构，生成同风格替换版视频";
+  const modeLabel = videoModes.find((mode) => mode.value === params.mode)?.label ?? params.mode;
   return [
     `请生成一段 ${params.ratio}、${params.resolution}、${params.seconds} 秒的短视频。`,
+    `生成方式：${modeLabel}。`,
     `原视频主题：${report.title}。${report.description}`,
     `场景：${report.narrative.scene}`,
     `角色：${report.narrative.character}`,
@@ -397,6 +464,79 @@ function buildGenerationPrompt(
     `替换要求：${requirements}`,
     `已替换素材：${replacedCount}/${totalCount || 1}。请保持原画面节奏、剧情逻辑和商业短视频质感。`,
   ].join("\n");
+}
+
+function normalizeReplacementParamsForModel(model: string, params: ReplacementGenerationParams): ReplacementGenerationParams {
+  return {
+    ...params,
+    ...normalizeVideoParamsForModel(model, params),
+  };
+}
+
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+    reader.onerror = () => reject(reader.error ?? new Error("图片读取失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function captureVideoFrameDataUrl(videoUrl: string): Promise<string> {
+  return new Promise((resolve) => {
+    if (!videoUrl) {
+      resolve("");
+      return;
+    }
+
+    const video = document.createElement("video");
+    let settled = false;
+    const cleanup = () => {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    };
+    const finish = (value: string) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+    const timer = window.setTimeout(() => finish(""), 6000);
+
+    video.crossOrigin = "anonymous";
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "auto";
+    video.onerror = () => {
+      window.clearTimeout(timer);
+      finish("");
+    };
+    video.onseeked = () => {
+      try {
+        const width = video.videoWidth || 1280;
+        const height = video.videoHeight || 720;
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext("2d")?.drawImage(video, 0, 0, width, height);
+        window.clearTimeout(timer);
+        finish(canvas.toDataURL("image/jpeg", 0.86));
+      } catch {
+        window.clearTimeout(timer);
+        finish("");
+      }
+    };
+    video.onloadedmetadata = () => {
+      try {
+        video.currentTime = Math.min(0.35, Math.max(0, (video.duration || 1) * 0.05));
+      } catch {
+        window.clearTimeout(timer);
+        finish("");
+      }
+    };
+    video.src = videoUrl;
+  });
 }
 
 function stringRecord(value: unknown): Record<string, string> {
@@ -668,6 +808,7 @@ function ReplacementCustomizePanel({
   items,
   videoUrl,
   fileName,
+  autoReferenceImages,
   onClose,
   onGenerate,
 }: {
@@ -676,15 +817,22 @@ function ReplacementCustomizePanel({
   items: string[];
   videoUrl: string;
   fileName: string;
+  autoReferenceImages: ReplacementReferenceImagesByKind;
   onClose: () => void;
   onGenerate: (payload: VideoGeneratePayload) => void;
 }) {
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [pendingImageAssetId, setPendingImageAssetId] = useState<string | null>(null);
   const [previews, setPreviews] = useState<Record<string, string>>({});
+  const [referenceImages, setReferenceImages] = useState<Record<string, string>>({});
   const [assetSelections, setAssetSelections] = useState<Record<string, string>>({});
+  const [modelOpen, setModelOpen] = useState(false);
   const [paramsOpen, setParamsOpen] = useState(false);
-  const [params, setParams] = useState<GenerationParams>({
+  const [submitting, setSubmitting] = useState(false);
+  const [videoModels, setVideoModels] = useState<VideoModelOption[]>(normalizeVideoModelOptions(fallbackVideoModels));
+  const [selectedModel, setSelectedModel] = useState("doubao-seedance-1-5-pro-251215");
+  const [params, setParams] = useState<ReplacementGenerationParams>({
+    mode: "reference",
     ratio: "9:16",
     resolution: "720p",
     seconds: 8,
@@ -702,20 +850,72 @@ function ReplacementCustomizePanel({
     ...Object.keys(previews),
     ...Object.keys(assetSelections),
   ]).size;
+  const selectedModelLabel = modelLabel(videoModels, selectedModel, "视频模型");
+  const paramsLabel = `${params.ratio} · ${params.resolution} · ${params.seconds}s`;
+
+  useEffect(() => {
+    let active = true;
+    void listVideoModels()
+      .then((result) => {
+        if (!active) return;
+        const nextModels = normalizeVideoModelOptions(result.models.length ? result.models : fallbackVideoModels);
+        setVideoModels(nextModels);
+        const nextModel = result.default || nextModels[0]?.model || "doubao-seedance-1-5-pro-251215";
+        setSelectedModel(nextModel);
+        setParams((current) => normalizeReplacementParamsForModel(nextModel, current));
+      })
+      .catch(() => {
+        if (active) setVideoModels(normalizeVideoModelOptions(fallbackVideoModels));
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const updateParams = (patch: Partial<ReplacementGenerationParams>) => {
+    setParams((current) => normalizeReplacementParamsForModel(selectedModel, { ...current, ...patch }));
+  };
+
+  const selectModel = (model: string) => {
+    setSelectedModel(model);
+    setParams((current) => normalizeReplacementParamsForModel(model, current));
+    setModelOpen(false);
+  };
+
+  const orderedReferenceImages = () => {
+    const seen = new Set<string>();
+    const ordered: string[] = [];
+    replacementReferenceOrder.forEach((kind) => {
+      assets[kind].forEach((asset) => pushUniqueReference(ordered, seen, referenceImages[asset.id] || ""));
+      autoReferenceImages[kind].forEach((url) => pushUniqueReference(ordered, seen, url));
+    });
+    return ordered;
+  };
 
   const handlePickLocal = (assetId: string) => {
     setPendingImageAssetId(assetId);
     imageInputRef.current?.click();
   };
 
-  const handleImageChange = (event: ChangeEvent<HTMLInputElement>) => {
+  const handleImageChange = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (!file || !pendingImageAssetId) return;
+    const assetId = pendingImageAssetId;
+    if (!file || !assetId) return;
     const previewUrl = URL.createObjectURL(file);
-    setPreviews((current) => ({ ...current, [pendingImageAssetId]: previewUrl }));
+    let referenceUrl = "";
+    try {
+      referenceUrl = await fileToDataUrl(file);
+    } catch {
+      URL.revokeObjectURL(previewUrl);
+      window.alert("图片读取失败，请换一张图片重试");
+      event.target.value = "";
+      return;
+    }
+    setPreviews((current) => ({ ...current, [assetId]: previewUrl }));
+    setReferenceImages((current) => ({ ...current, [assetId]: referenceUrl }));
     setAssetSelections((current) => {
       const next = { ...current };
-      delete next[pendingImageAssetId];
+      delete next[assetId];
       return next;
     });
     setOpenMenuId(null);
@@ -724,19 +924,38 @@ function ReplacementCustomizePanel({
 
   const handlePickAsset = (assetId: string) => {
     setAssetSelections((current) => ({ ...current, [assetId]: "已选择资产库素材" }));
+    setReferenceImages((current) => {
+      const next = { ...current };
+      delete next[assetId];
+      return next;
+    });
     setOpenMenuId(null);
   };
 
-  const handleGenerate = () => {
+  const handleGenerate = async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    const normalizedParams = normalizeReplacementParamsForModel(selectedModel, params);
+    const references = orderedReferenceImages();
+    if (references.length === 0) {
+      const fallbackSceneFrame = await captureVideoFrameDataUrl(videoUrl);
+      pushUniqueReference(references, new Set(references), fallbackSceneFrame);
+    }
+    setSubmitting(false);
+    if (references.length === 0) {
+      window.alert("请先替换或生成至少一张场景、角色或元素图片，再生成视频");
+      return;
+    }
     onGenerate({
-      prompt: buildGenerationPrompt(report, customizeText, params, replacedCount, totalCount),
-      model: "doubao-seedance-1-5-pro-251215",
-      ratio: params.ratio,
-      resolution: params.resolution,
-      seconds: params.seconds,
-      generate_audio: params.generate_audio,
-      watermark: params.watermark,
-      camerafixed: params.camerafixed,
+      prompt: buildGenerationPrompt(report, customizeText, normalizedParams, replacedCount, totalCount),
+      model: selectedModel,
+      ratio: normalizedParams.ratio,
+      resolution: normalizedParams.resolution,
+      seconds: normalizedParams.seconds,
+      generate_audio: normalizedParams.generate_audio,
+      watermark: normalizedParams.watermark,
+      camerafixed: normalizedParams.camerafixed,
+      reference_images: references,
     });
     onClose();
   };
@@ -818,103 +1037,208 @@ function ReplacementCustomizePanel({
               value={customizeText}
               onChange={(event) => setCustomizeText(event.target.value)}
             />
-            <div className="mt-3 flex items-center justify-between gap-3">
-              <div className="relative">
-                <button
-                  className="rounded-lg px-2 py-1 text-xs text-zinc-500 transition hover:bg-white/8 hover:text-zinc-200"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setParamsOpen((current) => !current);
-                  }}
-                >
-                  {params.ratio} · {params.resolution}
-                </button>
-                {paramsOpen && (
-                  <div className="absolute bottom-8 left-0 z-30 w-64 rounded-2xl border border-white/10 bg-[#101010]/95 p-3 shadow-[0_18px_50px_rgba(0,0,0,0.55)] backdrop-blur-xl">
-                    <div className="mb-3">
-                      <p className="mb-2 text-[11px] font-semibold text-zinc-400">画幅比例</p>
-                      <div className="flex flex-wrap gap-1.5">
-                        {generationRatios.map((ratio) => (
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <div className="relative">
+                  <button
+                    className={cn(
+                      "flex h-8 max-w-[180px] items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-400 transition hover:bg-white/8 hover:text-zinc-100",
+                      modelOpen && "bg-white/8 text-zinc-100"
+                    )}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setParamsOpen(false);
+                      setModelOpen((current) => !current);
+                    }}
+                  >
+                    <Link2 className="size-3.5 shrink-0" />
+                    <span className="truncate">{selectedModelLabel}</span>
+                    {modelOpen ? <ChevronUp className="size-3 shrink-0" /> : <ChevronDown className="size-3 shrink-0" />}
+                  </button>
+                  {modelOpen && (
+                    <div className="absolute bottom-10 left-0 z-30 w-[360px] overflow-hidden rounded-2xl border border-white/10 bg-[#101010]/95 p-2 shadow-[0_18px_50px_rgba(0,0,0,0.55)] backdrop-blur-xl">
+                      <div className="max-h-[320px] space-y-1 overflow-y-auto pr-1">
+                        {videoModels.map((option) => {
+                          const selected = option.model === selectedModel;
+                          const meta = videoModelMeta[option.model] ?? { description: "视频生成模型", chip: "60s" };
+                          return (
+                            <button
+                              key={option.model}
+                              className={cn(
+                                "flex min-h-[54px] w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left transition",
+                                selected ? "bg-white/[0.13]" : "hover:bg-white/[0.08]"
+                              )}
+                              onClick={() => selectModel(option.model)}
+                            >
+                              <span
+                                className={cn(
+                                  "flex size-8 shrink-0 items-center justify-center rounded-lg",
+                                  selected ? "bg-white/[0.15] text-white" : "bg-white/[0.08] text-zinc-400"
+                                )}
+                              >
+                                <Film className="size-4" />
+                              </span>
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate text-xs font-semibold text-white">
+                                  {modelLabel(videoModels, option.model, option.label)}
+                                </span>
+                                <span className="mt-0.5 block text-[11px] leading-4 text-zinc-500">{meta.description}</span>
+                              </span>
+                              <span className="shrink-0 rounded-full bg-white/[0.08] px-2 py-1 text-[10px] font-medium text-zinc-400">
+                                {meta.chip}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <div className="relative">
+                  <button
+                    className={cn(
+                      "flex h-8 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-500 transition hover:bg-white/8 hover:text-zinc-200",
+                      paramsOpen && "bg-white/8 text-zinc-200"
+                    )}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setModelOpen(false);
+                      setParamsOpen((current) => !current);
+                    }}
+                  >
+                    <Monitor className="size-3.5" />
+                    <span>{paramsLabel}</span>
+                    {paramsOpen ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
+                  </button>
+                  {paramsOpen && (
+                    <div className="absolute bottom-10 left-0 z-30 w-[360px] rounded-2xl border border-white/10 bg-[#101010]/95 p-4 shadow-[0_18px_50px_rgba(0,0,0,0.55)] backdrop-blur-xl">
+                      <p className="mb-3 text-sm font-semibold text-zinc-300">视频设置</p>
+
+                      <p className="mb-2 text-xs font-semibold text-zinc-400">生成方式</p>
+                      <div className="mb-4 grid grid-cols-3 rounded-xl bg-white/[0.045] p-1">
+                        {videoModes.map((mode) => (
                           <button
-                            key={ratio}
+                            key={mode.value}
                             className={cn(
-                              "rounded-full border px-2.5 py-1 text-[11px] transition",
-                              params.ratio === ratio
-                                ? "border-cyan-300/60 bg-cyan-300/15 text-cyan-100"
-                                : "border-white/10 bg-white/[0.04] text-zinc-400 hover:text-white"
+                              "h-8 rounded-lg text-[11px] font-medium transition",
+                              params.mode === mode.value ? "bg-white/12 text-white shadow-sm" : "text-zinc-500 hover:text-zinc-200"
                             )}
-                            onClick={() => setParams((current) => ({ ...current, ratio }))}
+                            onClick={() => updateParams({ mode: mode.value })}
                           >
-                            {ratio}
+                            {mode.label}
                           </button>
                         ))}
                       </div>
-                    </div>
-                    <div className="mb-3">
-                      <p className="mb-2 text-[11px] font-semibold text-zinc-400">清晰度</p>
-                      <div className="flex gap-1.5">
-                        {generationResolutions.map((resolution) => (
+
+                      <p className="mb-2 text-xs font-semibold text-zinc-400">宽高比</p>
+                      <div className="mb-4 grid grid-cols-4 gap-2">
+                        {videoRatios.map((ratio) => {
+                          const active = params.ratio === ratio;
+                          const isAuto = ratio === "Auto";
+                          return (
+                            <button
+                              key={ratio}
+                              className={cn(
+                                "flex h-[58px] flex-col items-center justify-center gap-1.5 rounded-xl border bg-white/[0.035] text-[11px] transition",
+                                active
+                                  ? "border-white bg-white/12 text-white"
+                                  : "border-white/14 text-zinc-400 hover:border-white/35 hover:text-zinc-100"
+                              )}
+                              onClick={() => updateParams({ ratio })}
+                            >
+                              {isAuto ? (
+                                <span className="font-medium">Auto</span>
+                              ) : (
+                                <span
+                                  className="block rounded-[3px] border border-current"
+                                  style={{
+                                    width: ratio === "21:9" || ratio === "16:9" ? 18 : ratio === "1:1" ? 14 : 10,
+                                    height: ratio === "21:9" || ratio === "16:9" ? 8 : ratio === "1:1" ? 14 : 18,
+                                  }}
+                                />
+                              )}
+                              <span>{ratio}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div className="mb-4">
+                        <div className="mb-2 flex items-center justify-between text-xs">
+                          <span className="font-semibold text-zinc-400">时长</span>
+                          <span className="text-zinc-500">{params.seconds}s / max 15s</span>
+                        </div>
+                        <input
+                          className="w-full accent-white"
+                          type="range"
+                          min={0}
+                          max={videoSeconds.length - 1}
+                          step={1}
+                          value={videoSeconds.indexOf(params.seconds)}
+                          onChange={(event) => updateParams({ seconds: videoSeconds[Number(event.target.value)] })}
+                        />
+                        <div className="mt-1 flex justify-between text-[10px] text-zinc-500">
+                          {videoSeconds.map((second) => (
+                            <span key={second}>{second}s</span>
+                          ))}
+                        </div>
+                      </div>
+
+                      <p className="mb-2 text-xs font-semibold text-zinc-400">分辨率</p>
+                      <div className="mb-4 flex flex-wrap gap-2">
+                        {videoResolutions.map((resolution) => (
                           <button
                             key={resolution}
                             className={cn(
-                              "rounded-full border px-2.5 py-1 text-[11px] transition",
+                              "h-8 rounded-full border px-3 text-[11px] font-medium transition",
                               params.resolution === resolution
-                                ? "border-cyan-300/60 bg-cyan-300/15 text-cyan-100"
-                                : "border-white/10 bg-white/[0.04] text-zinc-400 hover:text-white"
+                                ? "border-white bg-white/12 text-white"
+                                : "border-white/14 bg-white/[0.035] text-zinc-400 hover:border-white/35 hover:text-zinc-100"
                             )}
-                            onClick={() => setParams((current) => ({ ...current, resolution }))}
+                            onClick={() => updateParams({ resolution })}
                           >
                             {resolution}
                           </button>
                         ))}
                       </div>
-                    </div>
-                    <div className="mb-3">
-                      <p className="mb-2 text-[11px] font-semibold text-zinc-400">时长</p>
-                      <div className="flex flex-wrap gap-1.5">
-                        {generationSeconds.map((seconds) => (
-                          <button
-                            key={seconds}
-                            className={cn(
-                              "rounded-full border px-2.5 py-1 text-[11px] transition",
-                              params.seconds === seconds
-                                ? "border-fuchsia-300/60 bg-fuchsia-300/15 text-fuchsia-100"
-                                : "border-white/10 bg-white/[0.04] text-zinc-400 hover:text-white"
-                            )}
-                            onClick={() => setParams((current) => ({ ...current, seconds }))}
-                          >
-                            {seconds}s
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 text-[11px] text-zinc-300">
+
                       {[
-                        ["generate_audio", "生成音频"],
-                        ["watermark", "水印"],
-                        ["camerafixed", "固定镜头"],
-                      ].map(([key, label]) => (
-                        <label key={key} className="flex items-center gap-2 rounded-lg bg-white/[0.04] px-2 py-2">
-                          <input
-                            type="checkbox"
-                            checked={Boolean(params[key as keyof GenerationParams])}
-                            onChange={(event) =>
-                              setParams((current) => ({ ...current, [key]: event.target.checked }))
-                            }
-                          />
-                          {label}
-                        </label>
+                        { label: "音频", checked: params.generate_audio, patch: { generate_audio: !params.generate_audio } },
+                        { label: "固定镜头", checked: params.camerafixed, patch: { camerafixed: !params.camerafixed } },
+                        { label: "水印", checked: params.watermark, patch: { watermark: !params.watermark } },
+                      ].map((item) => (
+                        <button
+                          key={item.label}
+                          className="flex h-9 w-full items-center justify-between text-xs text-zinc-300"
+                          onClick={() => updateParams(item.patch)}
+                        >
+                          <span>{item.label}</span>
+                          <span
+                            className={cn(
+                              "flex h-5 w-9 items-center rounded-full p-0.5 transition",
+                              item.checked ? "bg-white" : "bg-white/14"
+                            )}
+                          >
+                            <span
+                              className={cn(
+                                "size-4 rounded-full shadow transition",
+                                item.checked ? "translate-x-4 bg-[#252525]" : "bg-zinc-500"
+                              )}
+                            />
+                          </span>
+                        </button>
                       ))}
                     </div>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
               <span className="text-xs text-cyan-200">{replacedCount}/{totalCount || 1} 已替换</span>
               <button
                 className="h-9 rounded-full bg-fuchsia-500 px-5 text-xs font-semibold text-white shadow-[0_12px_34px_rgba(236,72,153,0.34)] transition hover:bg-fuchsia-400 disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={handleGenerate}
+                onClick={() => void handleGenerate()}
+                disabled={submitting}
               >
-                生成｜{Math.max(1, totalCount * 4)}
+                {submitting ? "准备中" : `生成｜${Math.max(1, totalCount * 4)}`}
               </button>
             </div>
           </div>
@@ -1677,6 +2001,10 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
   const previewImages = imageItems.length > 0 ? imageItems : primaryImage ? [primaryImage] : [];
   const activePreviewImage = previewImages[activeImagePreviewIndex] ?? previewImages[0] ?? null;
   const imageUrl = imageDisplayUrl(primaryImage) || (typeof nodeData.config.imageUrl === "string" ? nodeData.config.imageUrl : "");
+  const selectedAnalysisModel =
+    typeof nodeData.config.analysisModel === "string" ? nodeData.config.analysisModel : "doubao";
+  const analysisSourceNodeId =
+    typeof nodeData.config.sourceNodeId === "string" ? nodeData.config.sourceNodeId : "";
   const stitcherClips = useMemo(
     () => nodeType === "videoStitcher" ? collectStitcherClips(id, allNodes, allEdges, nodeData.config.clipOrder) : [],
     [allEdges, allNodes, id, nodeData.config.clipOrder, nodeType]
@@ -1717,6 +2045,10 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
   const replacementCount = replacementAssets
     ? replacementAssets.character.length + replacementAssets.scene.length + replacementAssets.prop.length
     : items.length;
+  const replacementReferenceImages = useMemo(
+    () => collectReplacementReferenceImages(allNodes),
+    [allNodes]
+  );
 
   const copyFullScript = () => {
     if (!fullScriptText) return;
@@ -1803,6 +2135,36 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
             <p className="mb-3 text-xs leading-5 text-zinc-400">{nodeData.description}</p>
           )}
 
+          {nodeType === "doubaoAnalysis" && (
+            <div className="nodrag nopan mb-3 grid grid-cols-2 gap-1 rounded-xl border border-white/10 bg-white/[0.035] p-1">
+              {videoAnalysisModelOptions.map((option) => {
+                const active = selectedAnalysisModel === option.model;
+                return (
+                  <button
+                    key={option.model}
+                    className={cn(
+                      "h-8 rounded-lg px-2 text-center text-[11px] font-semibold transition",
+                      active
+                        ? "bg-cyan-300/18 text-cyan-50 ring-1 ring-cyan-200/35"
+                        : "text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-100"
+                    )}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      updateNodeData(id, {
+                        metric: `${option.label} / ready`,
+                        config: { analysisModel: option.model },
+                        items: ["视频分析", `模型：${option.label}`, "引用源视频"],
+                      });
+                    }}
+                    disabled={status === "running"}
+                  >
+                    {option.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
           {canViewFullScript && (
             <button
               className="nodrag nopan mb-3 flex w-full items-center justify-between rounded-xl border border-violet-300/40 bg-violet-400/12 px-3 py-2 text-left text-[11px] font-semibold text-violet-50 transition hover:border-violet-200/70 hover:bg-violet-300/20"
@@ -1846,11 +2208,13 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
         <div className="space-y-1.5">
           {items.slice(0, 4).map((item, index) => {
             const canStartDoubao =
-              nodeType === "videoUpload" &&
-              (item === "视频分析" ||
-                item === "视频分析中" ||
-                item === "等待豆包分析" ||
-                item === "豆包分析中");
+              (nodeType === "videoUpload" &&
+                (item === "视频分析" ||
+                  item === "视频分析中" ||
+                  item === "等待豆包分析" ||
+                  item === "豆包分析中")) ||
+              (nodeType === "doubaoAnalysis" &&
+                (item === "视频分析" || item === "视频分析中"));
             const canReplaceVideo =
               nodeType === "videoUpload" && (item === "视频已上传" || item === "重新上传视频");
             const canPreviewVideo =
@@ -1964,10 +2328,16 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
                   )}
                   onClick={(event) => {
                     event.stopPropagation();
-                    void runDoubaoAnalysis(id);
+                    if (nodeType === "doubaoAnalysis") {
+                      void runDoubaoAnalysis(analysisSourceNodeId, selectedAnalysisModel, id);
+                    } else {
+                      void runDoubaoAnalysis(id);
+                    }
                   }}
                 >
-                  {analysisLabel}
+                  {nodeType === "doubaoAnalysis" && !isAnalysisRunning
+                    ? `开始分析 · ${videoAnalysisModelLabel(selectedAnalysisModel)}`
+                    : analysisLabel}
                 </button>
               );
             }
@@ -2236,6 +2606,7 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
             items={items}
             videoUrl={videoUrl}
             fileName={fileName}
+            autoReferenceImages={replacementReferenceImages}
             onClose={() => setShowCustomizePanel(false)}
             onGenerate={(payload) => void runSeedanceGeneration(id, payload)}
           />

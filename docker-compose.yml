@@ -1,4 +1,21 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: nodelist
+      POSTGRES_USER: nodelist
+      POSTGRES_PASSWORD: nodelist
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nodelist -d nodelist"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   backend:
     build:
       context: ./backend
@@ -9,6 +26,9 @@ services:
       UPLOAD_DIR: /app/data/uploads
     volumes:
       - backend_uploads:/app/data/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
     expose:
       - "8001"
     restart: unless-stopped
@@ -36,3 +56,4 @@ services:
 
 volumes:
   backend_uploads:
+  postgres_data:
