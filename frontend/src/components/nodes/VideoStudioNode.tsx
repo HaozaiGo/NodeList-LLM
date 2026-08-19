@@ -39,7 +39,7 @@ import {
 import type { ImageAssetItem, ImageAssetTag, NodeData, NodeType, StudioNodeStatus } from "@/types/flow";
 import { cn } from "@/lib/utils";
 import { useFlowStore } from "@/stores/flowStore";
-import { downloadGeneratedVideo, listVideoModels, resolveMediaUrl, type VideoGeneratePayload, type VideoModelOption } from "@/lib/api";
+import { listVideoModels, resolveMediaUrl, type VideoGeneratePayload, type VideoModelOption } from "@/lib/api";
 import {
   fallbackVideoModels,
   modelLabel,
@@ -1926,6 +1926,7 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
     "缓存失败，可重试缓存",
     "重新生成并覆盖",
     "重新生成视频",
+    "查看生成视频",
   ]);
   const items = (() => {
     if (nodeType !== "videoGeneration" || status !== "done") return baseItems;
@@ -1942,7 +1943,6 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
   const allEdges = useFlowStore((state) => state.edges);
   const [showVideoPlayer, setShowVideoPlayer] = useState(false);
   const [previewVideoUrl, setPreviewVideoUrl] = useState("");
-  const [previewVideoLoading, setPreviewVideoLoading] = useState(false);
   const [showImagePreview, setShowImagePreview] = useState(false);
   const [activeImagePreviewIndex, setActiveImagePreviewIndex] = useState(0);
   const [showStitcherPreview, setShowStitcherPreview] = useState(false);
@@ -1952,7 +1952,6 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
   const [scriptCopied, setScriptCopied] = useState(false);
   const [showCustomizePanel, setShowCustomizePanel] = useState(false);
   const [showGeneratedAssetMenu, setShowGeneratedAssetMenu] = useState(false);
-  const previewBlobUrlRef = useRef("");
   const rawVideoUrl = typeof nodeData.config.videoUrl === "string" ? nodeData.config.videoUrl : "";
   const videoAssetId = typeof nodeData.config.assetId === "string" ? nodeData.config.assetId : "";
   const projectVideoAssetId = typeof nodeData.config.projectVideoAssetId === "string" ? nodeData.config.projectVideoAssetId : "";
@@ -1964,32 +1963,10 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
       ? resolveMediaUrl(`/api/video/generate/${encodeURIComponent(videoTaskId)}/content`)
       : rawVideoUrl;
 
-  useEffect(() => {
-    return () => {
-      if (previewBlobUrlRef.current) URL.revokeObjectURL(previewBlobUrlRef.current);
-    };
-  }, []);
-
-  const openVideoPreview = async () => {
-    if (!videoUrl && !videoTaskId) return;
-    if (playbackAssetId || (rawVideoUrl && !rawVideoUrl.startsWith("blob:") && !rawVideoUrl.includes("/api/video/generate/"))) {
-      setPreviewVideoUrl(videoUrl);
-      setShowVideoPlayer(true);
-      return;
-    }
-    if (!videoTaskId) return;
-
-    setPreviewVideoLoading(true);
-    try {
-      const blob = await downloadGeneratedVideo(videoTaskId);
-      if (previewBlobUrlRef.current) URL.revokeObjectURL(previewBlobUrlRef.current);
-      const objectUrl = URL.createObjectURL(blob);
-      previewBlobUrlRef.current = objectUrl;
-      setPreviewVideoUrl(objectUrl);
-      setShowVideoPlayer(true);
-    } finally {
-      setPreviewVideoLoading(false);
-    }
+  const openVideoPreview = () => {
+    if (!videoUrl) return;
+    setPreviewVideoUrl(videoUrl);
+    setShowVideoPlayer(true);
   };
   const isGeneratedImageNode =
     nodeType === "sceneAsset" &&
@@ -2049,6 +2026,7 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
     () => collectReplacementReferenceImages(allNodes),
     [allNodes]
   );
+  const canInlinePreviewGeneratedVideo = nodeType === "videoGeneration" && status === "done" && Boolean(videoUrl);
 
   const copyFullScript = () => {
     if (!fullScriptText) return;
@@ -2202,6 +2180,29 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
                 setShowStitcherPreview(true);
               }}
             />
+          )}
+
+          {canInlinePreviewGeneratedVideo && (
+            <button
+              className="nodrag nopan group/preview relative mb-3 block aspect-video w-full overflow-hidden rounded-xl border border-violet-300/25 bg-black text-left transition hover:border-violet-200/65"
+              onClick={(event) => {
+                event.stopPropagation();
+                openVideoPreview();
+              }}
+            >
+              <video
+                src={videoUrl}
+                className="size-full object-cover"
+                preload="metadata"
+                muted
+                playsInline
+              />
+              <div className="absolute inset-0 flex items-center justify-center bg-black/18 opacity-90 transition group-hover/preview:bg-black/8">
+                <span className="flex size-11 items-center justify-center rounded-full border border-white/25 bg-black/55 text-white shadow-xl backdrop-blur">
+                  <Play className="ml-0.5 size-5 fill-current" />
+                </span>
+              </div>
+            </button>
           )}
 
           {nodeType !== "videoStitcher" && items.length > 0 && (
@@ -2373,7 +2374,7 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
                     void openVideoPreview();
                   }}
                 >
-                  {previewVideoLoading ? "视频加载中" : item}
+                  {item}
                 </button>
               );
             }

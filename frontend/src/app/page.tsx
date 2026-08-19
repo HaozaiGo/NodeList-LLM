@@ -42,7 +42,6 @@ import { cn } from "@/lib/utils";
 import {
   ApiError,
   createVideoGenerationSpec,
-  downloadGeneratedVideo,
   isAuthExpiredError,
   listAssets,
   listImageModels,
@@ -604,7 +603,6 @@ function AssetPanel({
   const { screenToFlowPosition } = useReactFlow();
   const flowId = useFlowStore((state) => state.flowId);
   const nodes = useFlowStore((state) => state.nodes);
-  const updateNodeConfig = useFlowStore((state) => state.updateNodeConfig);
   const addImageUploadNode = useFlowStore((state) => state.addImageUploadNode);
   const addVideoUploadNode = useFlowStore((state) => state.addVideoUploadNode);
   const [activeAssetCategory, setActiveAssetCategory] = useState<AssetCategoryKey | null>(null);
@@ -612,7 +610,6 @@ function AssetPanel({
   const [previewImage, setPreviewImage] = useState<{ title: string; url: string } | null>(null);
   const [accountAssets, setAccountAssets] = useState<AssetRecord[]>([]);
   const [assetVideoUrls, setAssetVideoUrls] = useState<Record<string, string>>({});
-  const [loadingAssetIds, setLoadingAssetIds] = useState<Record<string, boolean>>({});
 
   const studioNodes = nodes.map((node) => node.data as NodeData);
   const selectedFlowNode = nodes.find((node) => node.selected) ?? null;
@@ -752,7 +749,7 @@ function AssetPanel({
     ];
   }, [finishedVideoAssets, nodeFinishedVideos]);
 
-  const resolveFinishedVideoUrl = useCallback(async (video: (typeof finishedVideos)[number]) => {
+  const resolveFinishedVideoUrl = useCallback((video: (typeof finishedVideos)[number]) => {
     if (assetVideoUrls[video.id]) return assetVideoUrls[video.id];
     if (video.url && !video.url.startsWith("blob:")) {
       const nextUrl = resolveMediaUrl(video.url);
@@ -761,26 +758,10 @@ function AssetPanel({
     }
     if (!video.taskId) return video.url;
 
-    setLoadingAssetIds((current) => ({ ...current, [video.id]: true }));
-    try {
-      const blob = await downloadGeneratedVideo(video.taskId);
-      const nextUrl = URL.createObjectURL(blob);
-      setAssetVideoUrls((current) => ({ ...current, [video.id]: nextUrl }));
-      updateNodeConfig(video.id, { videoUrl: nextUrl });
-      return nextUrl;
-    } finally {
-      setLoadingAssetIds((current) => ({ ...current, [video.id]: false }));
-    }
-  }, [assetVideoUrls, updateNodeConfig]);
-
-  useEffect(() => {
-    if (activeAssetCategory !== "finished") return;
-    finishedVideos.forEach((video) => {
-      if (!assetVideoUrls[video.id] && video.taskId) {
-        void resolveFinishedVideoUrl(video);
-      }
-    });
-  }, [activeAssetCategory, finishedVideos, assetVideoUrls, resolveFinishedVideoUrl]);
+    const nextUrl = resolveMediaUrl(`/api/video/generate/${encodeURIComponent(video.taskId)}/content`);
+    setAssetVideoUrls((current) => ({ ...current, [video.id]: nextUrl }));
+    return nextUrl;
+  }, [assetVideoUrls]);
 
   const assets = [
     { key: "character" as const, label: "人物", value: String(assetTagCount("character")), icon: UserRound, color: "text-fuchsia-300" },
@@ -997,7 +978,6 @@ function AssetPanel({
             <div className="grid max-h-[68vh] grid-cols-2 gap-3 overflow-y-auto">
               {finishedVideos.map((video) => {
                 const resolvedUrl = assetVideoUrls[video.id] || (!video.url.startsWith("blob:") ? resolveMediaUrl(video.url) : "");
-                const isLoading = Boolean(loadingAssetIds[video.id]);
                 return (
                   <div
                     key={video.id}
@@ -1023,7 +1003,7 @@ function AssetPanel({
                       </div>
                       <p className="truncate text-sm font-semibold text-white">{video.label}</p>
                       <p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">
-                        {isLoading ? "正在恢复视频" : `${video.seconds}s · ${video.ratio} · ${video.resolution}`}
+                        {`${video.seconds}s · ${video.ratio} · ${video.resolution}`}
                       </p>
                     </button>
                     <button

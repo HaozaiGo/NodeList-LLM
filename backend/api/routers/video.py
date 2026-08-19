@@ -1329,7 +1329,7 @@ def _probe_duration(input_path: Path) -> float:
         result = subprocess.run(command, capture_output=True, text=True, timeout=15)
         if result.returncode == 0:
             return max(0.0, float(result.stdout.strip() or "0"))
-    except (ValueError, subprocess.SubprocessError):
+    except (FileNotFoundError, ValueError, subprocess.SubprocessError):
         return 0.0
     return 0.0
 
@@ -2143,8 +2143,10 @@ async def get_generated_video_status(
         raise HTTPException(status_code=502, detail=_remote_error(response, "TokenOps video status failed"))
 
     result = response.json()
+    video_urls = _extract_video_urls(result) if result.get("status") == "completed" else []
     return {
         **result,
+        "videoUrls": video_urls,
         "content_path": f"/api/video/generate/{video_id}/content" if result.get("status") == "completed" else "",
     }
 

@@ -139,6 +139,7 @@ export interface VideoGenerationStatus {
   object?: string;
   model?: string;
   status: string;
+  videoUrls?: string[];
   content_path?: string;
   error?: unknown;
   usage?: unknown;

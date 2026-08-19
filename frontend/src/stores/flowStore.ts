@@ -27,6 +27,7 @@ import {
   streamTextGeneration,
   updateAsset,
   type VideoGeneratePayload,
+  type VideoGenerationStatus,
   type ImageGeneratePayload,
   type TextGeneratePayload,
 } from "@/lib/api";
@@ -602,6 +603,13 @@ function findSeedanceTargetId(nodes: Node<NodeData>[], edges: Edge[], sourceAnal
 function textFromUnknown(value: unknown, fallback = "") {
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function videoPlaybackUrlFromStatus(status: VideoGenerationStatus, taskId: string) {
+  const remoteUrl = Array.isArray(status.videoUrls)
+    ? status.videoUrls.find((item) => typeof item === "string" && item.trim())
+    : "";
+  return resolveMediaUrl(remoteUrl || status.content_path || `/api/video/generate/${encodeURIComponent(taskId)}/content`);
 }
 
 function compactText(value: string, maxLength = 1400) {
@@ -1630,7 +1638,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
     scheduleAutoSave(get);
 
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 180_000);
+    const timeoutId = window.setTimeout(() => controller.abort(), 420_000);
     try {
       const response = await streamTextGeneration(payload, { signal: controller.signal });
       const generatedText = await readTextGenerationStream(response, patchRunningText, patchRunningStatus);
@@ -2019,26 +2027,34 @@ export const useFlowStore = create<FlowState>((set, get) => ({
         scheduleAutoSave(get);
 
         if (status.status === "completed") {
+          const fallbackUrl = videoPlaybackUrlFromStatus(status, created.id);
           set({
             nodes: patchNodes(get().nodes, {
               [targetId]: {
-                status: "running",
-                metric: "正在缓存生成视频",
+                status: "done",
+                metric: "生成完成",
                 config: {
                   taskId: created.id,
-                  status: "caching",
+                  status: "completed",
                   error: "",
+                  videoUrl: fallbackUrl,
+                  projectVideoCacheStatus: "saving",
                   referenceImages: payload.reference_images,
                   referenceImageCount,
+                  userPrompt: payload.user_prompt ?? "",
                   generationSpec: payload.generation_spec,
+                  overwriteCurrent: false,
                 },
-                items: ["正在缓存生成视频", "完成后可快速播放", `${payload.seconds}s / ${payload.ratio} · ${payload.resolution}`],
+                items: [
+                  "查看生成视频",
+                  "正在缓存生成视频",
+                  `${payload.seconds}s / ${payload.ratio} · ${payload.resolution}`,
+                ],
               },
             }),
           });
           scheduleAutoSave(get);
 
-          const fallbackUrl = resolveMediaUrl(`/api/video/generate/${encodeURIComponent(created.id)}/content`);
           let playbackUrl = fallbackUrl;
           let projectVideoAssetId = "";
           let cacheStatus = "failed";
@@ -2219,19 +2235,25 @@ export const useFlowStore = create<FlowState>((set, get) => ({
         }
 
         if (status.status === "completed") {
+          const fallbackUrl = videoPlaybackUrlFromStatus(status, taskId);
           set({
             nodes: patchNodes(get().nodes, {
               [nodeId]: {
-                status: "running",
-                metric: "正在缓存生成视频",
-                config: { status: "caching", error: "" },
-                items: ["正在缓存生成视频", "完成后可快速播放", [seconds, ratio, resolution].filter(Boolean).join(" / ")],
+                status: "done",
+                metric: "生成完成",
+                config: {
+                  status: "completed",
+                  error: "",
+                  videoUrl: fallbackUrl,
+                  projectVideoCacheStatus: "saving",
+                  overwriteCurrent: false,
+                },
+                items: ["查看生成视频", "正在缓存生成视频", [seconds, ratio, resolution].filter(Boolean).join(" / ")],
               },
             }),
           });
           scheduleAutoSave(get);
 
-          const fallbackUrl = resolveMediaUrl(`/api/video/generate/${encodeURIComponent(taskId)}/content`);
           let playbackUrl = fallbackUrl;
           let projectVideoAssetId = "";
           let cacheStatus = "failed";

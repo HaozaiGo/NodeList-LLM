@@ -23,6 +23,7 @@ services:
       - path: ./backend/.env
         required: false
     environment:
+      DATABASE_URL: postgresql://nodelist:nodelist@postgres:5432/nodelist
       UPLOAD_DIR: /app/data/uploads
     volumes:
       - backend_uploads:/app/data/uploads

@@ -41,8 +41,8 @@ TEXT_GENERATION_MODELS = os.getenv(
     "TEXT_GENERATION_MODELS",
     f"{TEXT_POLISH_MODEL}:Doubao Seed 2.0 Pro,{QWEN_TEXT_MODEL}:Qwen3.8-Max",
 )
-TEXT_STREAM_READ_TIMEOUT_SECONDS = float(os.getenv("TEXT_STREAM_READ_TIMEOUT_SECONDS", "45"))
-TEXT_COMPLETE_TIMEOUT_SECONDS = float(os.getenv("TEXT_COMPLETE_TIMEOUT_SECONDS", "150"))
+TEXT_STREAM_READ_TIMEOUT_SECONDS = float(os.getenv("TEXT_STREAM_READ_TIMEOUT_SECONDS", "60"))
+TEXT_COMPLETE_TIMEOUT_SECONDS = float(os.getenv("TEXT_COMPLETE_TIMEOUT_SECONDS", "300"))
 
 POLISH_SYSTEM_PROMPT = (
     "你是短剧剧本与分镜生成助手。"
@@ -189,6 +189,15 @@ def _log_provider_response_id(*, model: str, response: httpx.Response, request_m
     )
 
 
+def _log_text_error(*, model: str, request_mode: str, error: Exception) -> None:
+    logger.warning(
+        "Text generation failed mode=%s model=%s error=%s",
+        request_mode,
+        model,
+        str(error),
+    )
+
+
 def _stream_delta_content(line: str) -> str:
     if not line.startswith("data:"):
         return ""
@@ -262,6 +271,7 @@ async def _complete_text(body: TextGenerateRequest, model: str) -> str:
                 raise TextGenerateError(body_text or exc.response.reason_phrase) from exc
             content = _completion_content(response.json()).strip()
     except (httpx.HTTPError, ValueError) as exc:
+        _log_text_error(model=model, request_mode="complete", error=exc)
         raise TextGenerateError(str(exc)) from exc
 
     if not content:
@@ -305,6 +315,7 @@ async def _stream_text(body: TextGenerateRequest, model: str) -> AsyncIterator[s
                         saw_content = True
                         yield content
     except httpx.HTTPError as exc:
+        _log_text_error(model=model, request_mode="stream", error=exc)
         raise TextGenerateError(str(exc)) from exc
 
     if not saw_content:
