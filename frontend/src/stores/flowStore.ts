@@ -1208,7 +1208,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
           metric: "Seedance queue",
           status: "queued",
           accent: "#8B5CF6",
-          config: { sourceNodeId, mode: "referenced_video", sourceLabel: sourceNode.data.label },
+          config: { sourceNodeId, mode: "referenced_video", sourceLabel: sourceNode.data.label, model: "seedance-2-0-fast" },
           items: ["等待生成视频", "参考上游素材", "可加入制作资产"],
         },
       },

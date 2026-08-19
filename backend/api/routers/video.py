@@ -182,8 +182,17 @@ def _video_model_options() -> list[dict[str, str]]:
     return options
 
 
+def _default_generation_model() -> str:
+    if TOKENOPS_GENERATION_MODEL and TOKENOPS_GENERATION_MODEL not in HIDDEN_VIDEO_MODELS:
+        return TOKENOPS_GENERATION_MODEL
+    options = _video_model_options()
+    if options:
+        return options[0]["model"]
+    return "seedance-2-0-fast"
+
+
 def _select_generation_model(payload: VideoGenerateRequest) -> str:
-    requested = payload.model.strip() or TOKENOPS_GENERATION_MODEL
+    requested = payload.model.strip() or _default_generation_model()
     allowed = {item["model"] for item in _video_model_options()}
     if requested not in allowed:
         raise HTTPException(status_code=400, detail="不支持的视频生成模型")
@@ -2030,7 +2039,7 @@ def _validate_generation_request(payload: VideoGenerateRequest) -> None:
 
 @router.get("/models")
 async def list_video_generation_models(_: User = Depends(get_current_user)):
-    return {"models": _video_model_options(), "default": TOKENOPS_GENERATION_MODEL}
+    return {"models": _video_model_options(), "default": _default_generation_model()}
 
 
 @router.post("/generate")

@@ -57,9 +57,11 @@ import {
 } from "@/lib/api";
 import {
   fallbackVideoModels,
+  hiddenVideoModels,
   modelLabel,
   normalizeVideoModelOptions,
   normalizeVideoParamsForModel,
+  resolveDefaultVideoModel,
   videoModelMeta,
   videoModes,
   videoRatios,
@@ -2274,7 +2276,7 @@ function StudioShell() {
         if (!active) return;
         const nextModels = normalizeVideoModelOptions(result.models.length ? result.models : fallbackVideoModels);
         setVideoModels(nextModels);
-        setSelectedVideoModel(result.default || nextModels[0]?.model || "seedance-2-0-fast");
+        setSelectedVideoModel(resolveDefaultVideoModel(result.default, nextModels));
       })
       .catch(() => {
         if (!active) return;
@@ -2296,10 +2298,14 @@ function StudioShell() {
   }, [isImageGenerationNode, selectedNode]);
 
   useEffect(() => {
-    if (!isVideoGenerationNode) return;
-    const nodeModel = typeof selectedNode?.data.config.model === "string" ? selectedNode.data.config.model : "";
-    if (nodeModel) setSelectedVideoModel(nodeModel);
-  }, [isVideoGenerationNode, selectedNode]);
+    if (!isVideoGenerationNode || !selectedNode) return;
+    const nodeModel = typeof selectedNode.data.config.model === "string" ? selectedNode.data.config.model : "";
+    const resolved =
+      nodeModel && !hiddenVideoModels.has(nodeModel)
+        ? nodeModel
+        : resolveDefaultVideoModel(undefined, videoModels);
+    setSelectedVideoModel(resolved);
+  }, [isVideoGenerationNode, selectedNode, videoModels]);
 
   useEffect(() => {
     if (!isTextGenerationNode) return;

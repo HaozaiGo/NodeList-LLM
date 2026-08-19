@@ -45,6 +45,7 @@ import {
   modelLabel,
   normalizeVideoModelOptions,
   normalizeVideoParamsForModel,
+  resolveDefaultVideoModel,
   videoModelMeta,
   videoModes,
   videoRatios,
@@ -860,7 +861,7 @@ function ReplacementCustomizePanel({
         if (!active) return;
         const nextModels = normalizeVideoModelOptions(result.models.length ? result.models : fallbackVideoModels);
         setVideoModels(nextModels);
-        const nextModel = result.default || nextModels[0]?.model || "seedance-2-0-fast";
+        const nextModel = resolveDefaultVideoModel(result.default, nextModels);
         setSelectedModel(nextModel);
         setParams((current) => normalizeReplacementParamsForModel(nextModel, current));
       })

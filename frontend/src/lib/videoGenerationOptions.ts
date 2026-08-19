@@ -11,6 +11,8 @@ export type VideoGenerationParams = {
   camerafixed: boolean;
 };
 
+export const defaultVideoModel = "seedance-2-0-fast";
+
 export const hiddenVideoModels = new Set([
   "wan2.2-i2v-spicy",
   "wan2.7-i2v-spicy",
@@ -60,6 +62,14 @@ export function normalizeVideoModelOptions(options: VideoModelOption[]) {
   return options
     .filter((option) => !hiddenVideoModels.has(option.model))
     .map((option) => (option.model === "bds-pro" ? { ...option, label: "MiniMax h3" } : option));
+}
+
+export function resolveDefaultVideoModel(defaultModel: string | undefined, options: VideoModelOption[]) {
+  const visible = normalizeVideoModelOptions(options);
+  if (defaultModel && !hiddenVideoModels.has(defaultModel) && visible.some((option) => option.model === defaultModel)) {
+    return defaultModel;
+  }
+  return visible[0]?.model || defaultVideoModel;
 }
 
 export function normalizeVideoParamsForModel(model: string, params: VideoGenerationParams): VideoGenerationParams {
