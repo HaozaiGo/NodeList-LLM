@@ -41,7 +41,7 @@ QWEN_COMPATIBLE_BASE_URL = (
     .strip()
     .rstrip("/")
 )
-TOKENOPS_GENERATION_MODEL = os.getenv("TOKENOPS_GENERATION_MODEL", "doubao-seedance-1-5-pro-251215").strip()
+TOKENOPS_GENERATION_MODEL = os.getenv("TOKENOPS_GENERATION_MODEL", "seedance-2-0-fast").strip()
 BDS_PRO_MODEL = "bds-pro"
 MINIMAX_H3_LABEL = "MiniMax h3"
 MINIMAX_H3_WORKFLOW = os.getenv("MINIMAX_H3_WORKFLOW", "h3_r2v_nvfp4_multiparam").strip()
@@ -49,6 +49,7 @@ TOKENOPS_SEEDANCE_15_MODEL = "doubao-seedance-1-5-pro-251215"
 LOVART_VIDEO_PREFIX = "lovart:"
 WAN22_I2V_MODEL = "wan2.2-i2v-spicy"
 WAN27_I2V_MODEL = "wan2.7-i2v-spicy"
+HIDDEN_VIDEO_MODELS = {WAN22_I2V_MODEL, WAN27_I2V_MODEL, TOKENOPS_SEEDANCE_15_MODEL}
 WAN_VIDEO_PREFIX = "wan:"
 BDS_A2_BASE_URL = os.getenv(
     "MINIMAX_H3_BASE_URL",
@@ -63,9 +64,6 @@ TOKENOPS_GENERATION_MODELS = os.getenv(
     ",".join(
         [
             f"{BDS_PRO_MODEL}:{MINIMAX_H3_LABEL}",
-            f"{WAN22_I2V_MODEL}:Wan 2.2",
-            f"{WAN27_I2V_MODEL}:Wan 2.7",
-            "doubao-seedance-1-5-pro-251215:Seedance 1.5 Pro",
             "seedance-2-0:Seedance 2.0",
             "seedance-2-0-fast:Seedance 2.0 Fast",
             "seedance-2-0-mini:Seedance 2.0 Mini",
@@ -173,13 +171,13 @@ def _video_model_options() -> list[dict[str, str]]:
             continue
         model, _, label = item.partition(":")
         model = model.strip()
-        if not model or model in seen:
+        if not model or model in seen or model in HIDDEN_VIDEO_MODELS:
             continue
         display_label = MINIMAX_H3_LABEL if model == BDS_PRO_MODEL else (label.strip() or model)
         options.append({"model": model, "label": display_label})
         seen.add(model)
 
-    if TOKENOPS_GENERATION_MODEL and TOKENOPS_GENERATION_MODEL not in seen:
+    if TOKENOPS_GENERATION_MODEL and TOKENOPS_GENERATION_MODEL not in seen and TOKENOPS_GENERATION_MODEL not in HIDDEN_VIDEO_MODELS:
         options.insert(0, {"model": TOKENOPS_GENERATION_MODEL, "label": TOKENOPS_GENERATION_MODEL})
     return options
 

@@ -796,9 +796,6 @@ function createSeedanceNode(
 function videoModelLabel(model: string): string {
   const labels: Record<string, string> = {
     "bds-pro": "MiniMax h3",
-    "wan2.2-i2v-spicy": "Wan 2.2",
-    "wan2.7-i2v-spicy": "Wan 2.7",
-    "doubao-seedance-1-5-pro-251215": "Seedance 1.5 Pro",
     "seedance-2-0": "Seedance 2.0",
     "seedance-2-0-fast": "Seedance 2.0 Fast",
     "seedance-2-0-mini": "Seedance 2.0 Mini",

@@ -1400,11 +1400,8 @@ function Composer({
   const visibleReferences = references.slice(0, 4);
   const imageReferenceCount = references.filter((item) => item.kind === "image").length;
   const referenceBadgeCount = references.length;
-  const limitedVideoReferenceModel =
-    selectedVideoModel === "wan2.2-i2v-spicy" ||
-    selectedVideoModel === "wan2.7-i2v-spicy" ||
-    selectedVideoModel === "doubao-seedance-1-5-pro-251215";
-  const videoReferenceLimit = selectedVideoModel === "wan2.2-i2v-spicy" ? 1 : 2;
+  const limitedVideoReferenceModel = false;
+  const videoReferenceLimit = 2;
   const videoReferenceHint =
     isVideoGenerationNode && imageReferenceCount > 0
       ? limitedVideoReferenceModel
@@ -2074,7 +2071,7 @@ function StudioShell() {
   const [videoModels, setVideoModels] = useState<VideoModelOption[]>(fallbackVideoModels);
   const [selectedImageModel, setSelectedImageModel] = useState("gpt-image-2");
   const [selectedTextModel, setSelectedTextModel] = useState("doubao-seed-2-0-pro-260215");
-  const [selectedVideoModel, setSelectedVideoModel] = useState("doubao-seedance-1-5-pro-251215");
+  const [selectedVideoModel, setSelectedVideoModel] = useState("seedance-2-0-fast");
   const [imageParams, setImageParams] = useState<ImageGenerationParams>({
     quality: "标准画质",
     resolution: "2K",
@@ -2277,7 +2274,7 @@ function StudioShell() {
         if (!active) return;
         const nextModels = normalizeVideoModelOptions(result.models.length ? result.models : fallbackVideoModels);
         setVideoModels(nextModels);
-        setSelectedVideoModel(result.default || nextModels[0]?.model || "doubao-seedance-1-5-pro-251215");
+        setSelectedVideoModel(result.default || nextModels[0]?.model || "seedance-2-0-fast");
       })
       .catch(() => {
         if (!active) return;

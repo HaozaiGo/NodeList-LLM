@@ -830,7 +830,7 @@ function ReplacementCustomizePanel({
   const [paramsOpen, setParamsOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [videoModels, setVideoModels] = useState<VideoModelOption[]>(normalizeVideoModelOptions(fallbackVideoModels));
-  const [selectedModel, setSelectedModel] = useState("doubao-seedance-1-5-pro-251215");
+  const [selectedModel, setSelectedModel] = useState("seedance-2-0-fast");
   const [params, setParams] = useState<ReplacementGenerationParams>({
     mode: "reference",
     ratio: "9:16",
@@ -860,7 +860,7 @@ function ReplacementCustomizePanel({
         if (!active) return;
         const nextModels = normalizeVideoModelOptions(result.models.length ? result.models : fallbackVideoModels);
         setVideoModels(nextModels);
-        const nextModel = result.default || nextModels[0]?.model || "doubao-seedance-1-5-pro-251215";
+        const nextModel = result.default || nextModels[0]?.model || "seedance-2-0-fast";
         setSelectedModel(nextModel);
         setParams((current) => normalizeReplacementParamsForModel(nextModel, current));
       })
