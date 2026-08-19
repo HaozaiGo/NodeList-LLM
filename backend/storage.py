@@ -25,14 +25,24 @@ class StoredObject:
     size: int
 
 
-def safe_storage_name(name: str) -> str:
-    return Path(name or "asset.bin").name.replace("/", "-").replace("\\", "-")
+def safe_storage_name(name: str, *, max_bytes: int = 120) -> str:
+    cleaned = Path(name or "asset.bin").name.replace("/", "-").replace("\\", "-") or "asset.bin"
+    if len(cleaned.encode("utf-8")) <= max_bytes:
+        return cleaned
+    encoded = cleaned.encode("utf-8")[:max_bytes]
+    while encoded:
+        try:
+            return encoded.decode("utf-8")
+        except UnicodeDecodeError:
+            encoded = encoded[:-1]
+    return "asset.bin"
 
 
 def object_key_for_asset(asset_id: str, kind: str, filename: str) -> str:
     now = datetime.now(timezone.utc)
     folder = "videos" if "video" in kind else "images" if "image" in kind else "files"
-    return f"nodelist/{kind}/{folder}/{now:%Y/%m/%d}/{asset_id}-{safe_storage_name(filename)}"
+    ext = Path(safe_storage_name(filename)).suffix or ".bin"
+    return f"nodelist/{kind}/{folder}/{now:%Y/%m/%d}/{asset_id}{ext}"
 
 
 class LocalStorage:

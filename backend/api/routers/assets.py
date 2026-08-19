@@ -229,8 +229,7 @@ async def _create_video_record(
         return asset_to_dict(existing)
 
     asset_id = str(uuid.uuid4())
-    filename = f"{safe_storage_name(payload.title or default_title)}.mp4"
-    storage_key = object_key_for_asset(asset_id, kind, filename)
+    storage_key = object_key_for_asset(asset_id, kind, "video.mp4")
     cached_project_video = None
     if kind == "finished_video":
         cached_project_video = (
