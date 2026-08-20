@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import re
 import uuid
+from copy import deepcopy
+from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -83,6 +85,72 @@ def _ensure_flow_owner(db: Session, flow_id: Optional[str], user: User) -> None:
     flow = db.get(Flow, flow_id)
     if not flow or flow.user_id != user.id:
         raise HTTPException(status_code=404, detail="Flow not found")
+
+
+def _image_output_summary(payload: ImageGenerateRequest) -> str:
+    return " · ".join(
+        [
+            payload.ratio,
+            payload.quality or "标准画质",
+            payload.resolution,
+            f"{payload.count or 1}张",
+        ]
+    )
+
+
+def _patch_flow_image_generation_task(
+    *,
+    db: Session,
+    user: User,
+    payload: ImageGenerateRequest,
+    task_id: str,
+    project_id: Optional[str],
+    model: str,
+) -> None:
+    if not payload.flowId or not payload.nodeId:
+        return
+    flow = db.get(Flow, payload.flowId)
+    if not flow or flow.user_id != user.id:
+        return
+
+    nodes = deepcopy(flow.nodes or [])
+    updated = False
+    now = datetime.now(timezone.utc).isoformat()
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("id") != payload.nodeId:
+            continue
+        data = dict(node.get("data") or {})
+        config = dict(data.get("config") or {})
+        config.update(
+            {
+                "taskId": task_id,
+                "generationStatus": "running",
+                "projectId": project_id or config.get("projectId") or "",
+                "model": model,
+                "ratio": payload.ratio,
+                "resolution": payload.resolution,
+                "quality": payload.quality,
+                "count": payload.count,
+                "prompt": payload.prompt,
+                "imageTaskUpdatedAt": now,
+                "taskCreatedAt": config.get("taskCreatedAt") or now,
+            }
+        )
+        data.update(
+            {
+                "status": "running",
+                "metric": "Lovart 已排队",
+                "config": config,
+                "items": ["Lovart 生成中", "正在获取结果", _image_output_summary(payload)],
+            }
+        )
+        node["data"] = data
+        updated = True
+        break
+
+    if updated:
+        flow.nodes = nodes
+        db.commit()
 
 
 def _map_lovart_error(error: LovartAPIError) -> HTTPException:
@@ -246,8 +314,17 @@ async def generate_image(
         raise _map_lovart_error(exc) from exc
 
     task_ids = [result.task_id for result in results]
+    response_task_id = _image_batch_id(task_ids) if len(task_ids) > 1 else task_ids[0]
+    _patch_flow_image_generation_task(
+        db=db,
+        user=user,
+        payload=payload,
+        task_id=response_task_id,
+        project_id=results[0].request_id if results else None,
+        model=model,
+    )
     return ImageGenerateResponse(
-        id=_image_batch_id(task_ids) if len(task_ids) > 1 else task_ids[0],
+        id=response_task_id,
         model=model,
         status="running",
         projectId=results[0].request_id if results else None,

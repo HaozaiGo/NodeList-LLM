@@ -10,6 +10,16 @@ from auth import get_current_user
 
 router = APIRouter(prefix="/flows", tags=["flows"])
 
+IMAGE_ASSET_NODE_TYPES = {"characterAsset", "sceneAsset", "propAsset"}
+ACTIVE_IMAGE_GENERATION_STATUSES = {"submitting", "submitted", "running", "timeout"}
+IMAGE_GENERATION_STATE_KEYS = {
+    "taskId",
+    "generationStatus",
+    "projectId",
+    "taskCreatedAt",
+    "imageTaskUpdatedAt",
+}
+
 
 class NodeSchema(BaseModel):
     id: str
@@ -54,6 +64,66 @@ def _own_flow(flow_id: str, user: User, db: Session) -> Flow:
     if not flow or flow.user_id != user.id:
         raise HTTPException(status_code=404, detail="Flow not found")
     return flow
+
+
+def _merge_server_image_generation_state(existing_nodes: list[Any], incoming_nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    existing_by_id = {
+        node.get("id"): node
+        for node in existing_nodes
+        if isinstance(node, dict) and isinstance(node.get("id"), str)
+    }
+    merged: list[dict[str, Any]] = []
+    for node in incoming_nodes:
+        if node.get("type") not in IMAGE_ASSET_NODE_TYPES:
+            merged.append(node)
+            continue
+
+        existing = existing_by_id.get(node.get("id"))
+        if not isinstance(existing, dict):
+            merged.append(node)
+            continue
+
+        existing_data = existing.get("data")
+        incoming_data = node.get("data")
+        if not isinstance(existing_data, dict) or not isinstance(incoming_data, dict):
+            merged.append(node)
+            continue
+
+        existing_config = existing_data.get("config")
+        incoming_config = incoming_data.get("config")
+        if not isinstance(existing_config, dict) or not isinstance(incoming_config, dict):
+            merged.append(node)
+            continue
+
+        existing_task_id = str(existing_config.get("taskId") or "").strip()
+        incoming_task_id = str(incoming_config.get("taskId") or "").strip()
+        existing_status = str(existing_config.get("generationStatus") or "").lower()
+        incoming_status = str(incoming_config.get("generationStatus") or "").lower()
+        if not existing_task_id or incoming_task_id:
+            merged.append(node)
+            continue
+        if existing_status not in ACTIVE_IMAGE_GENERATION_STATUSES:
+            merged.append(node)
+            continue
+        if incoming_status and incoming_status not in {"submitting", "submitted"}:
+            merged.append(node)
+            continue
+
+        protected_config = dict(incoming_config)
+        for key in IMAGE_GENERATION_STATE_KEYS:
+            if key in existing_config:
+                protected_config[key] = existing_config[key]
+        protected_data = dict(incoming_data)
+        protected_data["config"] = protected_config
+        if existing_data.get("status") in {"running", "queued"}:
+            protected_data["status"] = existing_data.get("status")
+        if isinstance(existing_data.get("metric"), str):
+            protected_data["metric"] = existing_data["metric"]
+        if isinstance(existing_data.get("items"), list):
+            protected_data["items"] = existing_data["items"]
+        merged.append({**node, "data": protected_data})
+
+    return merged
 
 
 @router.get("", response_model=list[FlowOut], include_in_schema=False)
@@ -105,7 +175,7 @@ def update_flow(
     if body.name is not None:
         flow.name = body.name
     if body.nodes is not None:
-        flow.nodes = [n.model_dump() for n in body.nodes]
+        flow.nodes = _merge_server_image_generation_state(flow.nodes or [], [n.model_dump() for n in body.nodes])
     if body.edges is not None:
         flow.edges = [e.model_dump() for e in body.edges]
     db.commit()

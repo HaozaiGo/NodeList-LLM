@@ -68,6 +68,7 @@ interface FlowState {
   runDoubaoAnalysis: (sourceNodeId?: string, model?: string, targetNodeId?: string) => Promise<void>;
   runTextGeneration: (nodeId: string, promptText?: string, model?: string) => Promise<void>;
   runImageGeneration: (nodeId: string, payload: ImageGeneratePayload) => Promise<void>;
+  recoverImageGeneration: (nodeId: string) => Promise<void>;
   runSeedanceGeneration: (sourceAnalysisNodeId: string, payload: VideoGeneratePayload) => Promise<void>;
   recoverVideoGeneration: (nodeId: string) => Promise<void>;
   ensureProjectVideoCache: (nodeId: string) => Promise<void>;
@@ -89,6 +90,8 @@ let seedanceNodeCounter = 1;
 let stitcherNodeCounter = 1;
 const activeVideoGenerationKeys = new Set<string>();
 const activeVideoRecoveryNodeIds = new Set<string>();
+const activeImageRecoveryNodeIds = new Set<string>();
+const imageRecoveryAttempts = new Map<string, number>();
 const doubaoProgressTimers = new Map<string, ReturnType<typeof setInterval>>();
 let selectionClipboard: { nodes: Node<NodeData>[]; edges: Edge[] } | null = null;
 let selectionPasteCount = 0;
@@ -496,6 +499,39 @@ function pendingVideoGenerationNodeIds(nodes: Node<NodeData>[]) {
       return !["completed", "failed"].includes(configStatus);
     })
     .map((node) => node.id);
+}
+
+function isImageAssetGenerationNode(node?: Node<NodeData>) {
+  return Boolean(node && ["characterAsset", "sceneAsset", "propAsset"].includes(String(node.type)));
+}
+
+function imageGenerationTaskId(node: Node<NodeData>) {
+  return typeof node.data.config.taskId === "string" ? node.data.config.taskId.trim() : "";
+}
+
+function pendingImageGenerationNodeIds(nodes: Node<NodeData>[]) {
+  return nodes
+    .filter((node) => {
+      if (!isImageAssetGenerationNode(node)) return false;
+      if (node.data.status === "done" || node.data.status === "error") return false;
+      const configStatus = String(node.data.config.generationStatus || "").toLowerCase();
+      if (["completed", "failed"].includes(configStatus)) return false;
+      return Boolean(imageGenerationTaskId(node)) || configStatus === "submitting";
+    })
+    .map((node) => node.id);
+}
+
+function queueImageGenerationRecovery(get: () => FlowState, nodeIds: string[]) {
+  if (typeof window === "undefined" || nodeIds.length === 0) return;
+  window.setTimeout(() => {
+    const state = get();
+    nodeIds.forEach((nodeId) => {
+      const node = state.nodes.find((item) => item.id === nodeId);
+      if (!node || !isImageAssetGenerationNode(node)) return;
+      if (node.data.status === "done" || node.data.status === "error") return;
+      void state.recoverImageGeneration(nodeId);
+    });
+  }, 800);
 }
 
 function isActiveVideoNode(node?: Node<NodeData>) {
@@ -1686,6 +1722,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
     if (!node) return;
     const outputSummary = `${payload.ratio} · ${payload.quality || "标准画质"} · ${payload.resolution} · ${payload.count || 1}张`;
     const outputTag = normalizeImageAssetTag(payload.asset_tag ?? node.data.config.assetTag);
+    imageRecoveryAttempts.delete(nodeId);
 
     set({
       nodes: patchNodes(get().nodes, {
@@ -1705,6 +1742,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
             assetTag: outputTag,
             taskId: "",
             generationStatus: "submitting",
+            submittedAt: new Date().toISOString(),
           },
           items: ["提交 Lovart 任务中", "参考素材已带入", outputSummary],
         },
@@ -1718,7 +1756,12 @@ export const useFlowStore = create<FlowState>((set, get) => ({
         nodes: patchNodes(get().nodes, {
           [nodeId]: {
             metric: "Lovart 已排队",
-            config: { taskId: created.id, generationStatus: created.status },
+            config: {
+              taskId: created.id,
+              projectId: created.projectId ?? "",
+              generationStatus: created.status,
+              taskCreatedAt: new Date().toISOString(),
+            },
             items: ["Lovart 生成中", "正在获取结果", outputSummary],
           },
         }),
@@ -1780,6 +1823,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
             }),
           });
           scheduleAutoSave(get);
+          imageRecoveryAttempts.delete(nodeId);
           return;
         }
 
@@ -1795,6 +1839,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
             }),
           });
           scheduleAutoSave(get);
+          imageRecoveryAttempts.delete(nodeId);
           return;
         }
 
@@ -1833,6 +1878,159 @@ export const useFlowStore = create<FlowState>((set, get) => ({
         }),
       });
       scheduleAutoSave(get);
+    }
+  },
+
+  recoverImageGeneration: async (nodeId) => {
+    if (activeImageRecoveryNodeIds.has(nodeId)) return;
+    const node = get().nodes.find((item) => item.id === nodeId);
+    if (!node || !isImageAssetGenerationNode(node)) return;
+
+    const taskId = imageGenerationTaskId(node);
+    const config = node.data.config;
+    const generationStatus = String(config.generationStatus || "").toLowerCase();
+    const outputSummary = generatedAssetSummary(config) || "Lovart 图片生成";
+    const outputTag = normalizeImageAssetTag(config.assetTag);
+    const model = typeof config.model === "string" ? config.model : undefined;
+
+    if (!taskId) {
+      if (generationStatus === "submitting") {
+        set({
+          nodes: patchNodes(get().nodes, {
+            [nodeId]: {
+              status: "error",
+              metric: "Lovart 提交中断",
+              config: {
+                generationStatus: "failed",
+                error: "未拿到远端任务 ID，请重新生成",
+              },
+              items: ["提交中断", "未拿到远端任务 ID", "请重新生成"],
+            },
+          }),
+        });
+        scheduleAutoSave(get);
+      }
+      return;
+    }
+
+    activeImageRecoveryNodeIds.add(nodeId);
+
+    try {
+      set({
+        nodes: patchNodes(get().nodes, {
+          [nodeId]: {
+            status: "running",
+            metric: "Lovart 恢复查询中",
+            config: { taskId, generationStatus: "running", error: "" },
+            items: ["正在恢复图片生成结果", `任务 ID：${taskId}`, outputSummary],
+          },
+        }),
+      });
+      scheduleAutoSave(get);
+
+      const status = await getImageGenerationStatus(taskId, {
+        model,
+        flowId: get().flowId,
+        nodeId,
+      });
+
+      if (status.status === "completed" && status.assets.length > 0) {
+        const images: ImageAssetItem[] = status.assets.map((asset, index) => ({
+          id: asset.id || `lovart-${taskId}-${index + 1}`,
+          assetId: asset.id,
+          name: asset.title || `Lovart 生成图 ${index + 1}`,
+          url: asset.previewUrl || asset.url,
+          storageKey: asset.storageKey,
+          tag: outputTag,
+          uploadStatus: "saved",
+        }));
+        images.forEach((image) => {
+          if (image.assetId) {
+            void updateAsset(image.assetId, { metadata: { tag: outputTag } }).catch(() => {});
+          }
+        });
+        const primary = images[0];
+        const completedConfig = {
+          ...config,
+          taskId,
+          generationStatus: "completed",
+          model: status.model || model || "",
+          count: images.length,
+          requestedCount: typeof config.count === "number" ? config.count : images.length,
+          images,
+          primaryImageId: primary?.id ?? "",
+          imageUrl: primary?.url ?? "",
+          fileName: images.length === 1 ? primary?.name ?? "Lovart 生成图" : `${images.length} 张 Lovart 生成图`,
+          assetTag: outputTag,
+          error: "",
+        };
+        set({
+          nodes: patchNodes(get().nodes, {
+            [nodeId]: {
+              status: "done",
+              ...patchGeneratedImageAssetNode(completedConfig, outputTag),
+              config: completedConfig,
+            },
+          }),
+        });
+        scheduleAutoSave(get);
+        imageRecoveryAttempts.delete(nodeId);
+        return;
+      }
+
+      if (status.status === "failed") {
+        const message = status.error || "请调整提示词或模型后重试";
+        set({
+          nodes: patchNodes(get().nodes, {
+            [nodeId]: {
+              status: "error",
+              metric: "Lovart 生成失败",
+              config: { taskId, generationStatus: "failed", error: message },
+              items: ["生成失败", message.slice(0, 80), "请调整提示词或模型后重试"],
+            },
+          }),
+        });
+        scheduleAutoSave(get);
+        imageRecoveryAttempts.delete(nodeId);
+        return;
+      }
+
+      const attempts = (imageRecoveryAttempts.get(nodeId) ?? 0) + 1;
+      imageRecoveryAttempts.set(nodeId, attempts);
+      set({
+        nodes: patchNodes(get().nodes, {
+          [nodeId]: {
+            status: "queued",
+            metric: "Lovart 仍在生成",
+            config: { taskId, generationStatus: "timeout" },
+            items: ["生成仍在进行", "后台会继续恢复查询", outputSummary],
+          },
+        }),
+      });
+      scheduleAutoSave(get);
+      if (attempts < 36 && typeof window !== "undefined") {
+        window.setTimeout(() => void get().recoverImageGeneration(nodeId), 5000);
+      }
+    } catch (error) {
+      const attempts = (imageRecoveryAttempts.get(nodeId) ?? 0) + 1;
+      imageRecoveryAttempts.set(nodeId, attempts);
+      const message = error instanceof Error ? error.message : "图片生成状态查询失败";
+      set({
+        nodes: patchNodes(get().nodes, {
+          [nodeId]: {
+            status: "queued",
+            metric: "等待恢复查询",
+            config: { taskId, generationStatus: "polling_retry", error: message },
+            items: ["恢复查询失败", message.slice(0, 80), outputSummary],
+          },
+        }),
+      });
+      scheduleAutoSave(get);
+      if (attempts < 36 && typeof window !== "undefined") {
+        window.setTimeout(() => void get().recoverImageGeneration(nodeId), 5000);
+      }
+    } finally {
+      activeImageRecoveryNodeIds.delete(nodeId);
     }
   },
 
@@ -2571,6 +2769,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
       nodes,
       edges: curvedEdges(record.edges as Edge[]),
     });
+    queueImageGenerationRecovery(get, pendingImageGenerationNodeIds(nodes));
     queueVideoGenerationRecovery(get, pendingVideoGenerationNodeIds(nodes));
     queueProjectVideoCache(get, pendingProjectVideoCacheNodeIds(nodes));
   },
@@ -2587,6 +2786,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
           nodes,
           edges: curvedEdges(record.edges as Edge[]),
         });
+        queueImageGenerationRecovery(get, pendingImageGenerationNodeIds(nodes));
         queueVideoGenerationRecovery(get, pendingVideoGenerationNodeIds(nodes));
         queueProjectVideoCache(get, pendingProjectVideoCacheNodeIds(nodes));
       } else {
