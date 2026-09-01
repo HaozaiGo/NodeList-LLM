@@ -12,6 +12,7 @@ import {
   ChevronUp,
   Clapperboard,
   Check,
+  CloudUpload,
   Clock3,
   Copy,
   Film,
@@ -39,7 +40,13 @@ import {
 import type { ImageAssetItem, ImageAssetTag, NodeData, NodeType, StudioNodeStatus } from "@/types/flow";
 import { cn } from "@/lib/utils";
 import { useFlowStore } from "@/stores/flowStore";
-import { listVideoModels, resolveMediaUrl, type VideoGeneratePayload, type VideoModelOption } from "@/lib/api";
+import {
+  listVideoModels,
+  resolveMediaUrl,
+  uploadLovartSubject,
+  type VideoGeneratePayload,
+  type VideoModelOption,
+} from "@/lib/api";
 import {
   fallbackVideoModels,
   modelLabel,
@@ -1930,6 +1937,10 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
     "查看生成视频",
   ]);
   const items = (() => {
+    if (nodeType === "imageUpload") {
+      const imageCount = Array.isArray(nodeData.config.images) ? nodeData.config.images.length : 1;
+      return [`${imageCount} 张图片已上传`, "上传 Lovart 主体"];
+    }
     if (nodeType !== "videoGeneration" || status !== "done") return baseItems;
     return baseItems.filter((item) => !hiddenCompletedVideoItems.has(item));
   })();
@@ -1939,6 +1950,7 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
   const recoverVideoGeneration = useFlowStore((state) => state.recoverVideoGeneration);
   const addGeneratedVideoToAssets = useFlowStore((state) => state.addGeneratedVideoToAssets);
   const setGeneratedImageAssetTag = useFlowStore((state) => state.setGeneratedImageAssetTag);
+  const updateImageAsset = useFlowStore((state) => state.updateImageAsset);
   const updateNodeData = useFlowStore((state) => state.updateNodeData);
   const allNodes = useFlowStore((state) => state.nodes);
   const allEdges = useFlowStore((state) => state.edges);
@@ -1953,6 +1965,7 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
   const [scriptCopied, setScriptCopied] = useState(false);
   const [showCustomizePanel, setShowCustomizePanel] = useState(false);
   const [showGeneratedAssetMenu, setShowGeneratedAssetMenu] = useState(false);
+  const [uploadingLovartSubject, setUploadingLovartSubject] = useState(false);
   const rawVideoUrl = typeof nodeData.config.videoUrl === "string" ? nodeData.config.videoUrl : "";
   const videoAssetId = typeof nodeData.config.assetId === "string" ? nodeData.config.assetId : "";
   const projectVideoAssetId = typeof nodeData.config.projectVideoAssetId === "string" ? nodeData.config.projectVideoAssetId : "";
@@ -1979,6 +1992,50 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
   const previewImages = imageItems.length > 0 ? imageItems : primaryImage ? [primaryImage] : [];
   const activePreviewImage = previewImages[activeImagePreviewIndex] ?? previewImages[0] ?? null;
   const imageUrl = imageDisplayUrl(primaryImage) || (typeof nodeData.config.imageUrl === "string" ? nodeData.config.imageUrl : "");
+  const lovartSubjectStatus = String(primaryImage?.lovartSubjectStatus || "").trim().toLowerCase();
+  const lovartSubjectApproved = /^(active|approved|done|passed|ready|success|succeeded|validated)$/.test(
+    lovartSubjectStatus
+  );
+  const lovartSubjectLabel = uploadingLovartSubject
+    ? "上传 Lovart 主体中"
+    : lovartSubjectApproved
+      ? "Lovart 主体已可用"
+      : lovartSubjectStatus === "pending" || lovartSubjectStatus === "processing"
+        ? "Lovart 主体审核中"
+        : lovartSubjectStatus === "failed" || lovartSubjectStatus === "error" || lovartSubjectStatus === "rejected"
+          ? "重新上传 Lovart 主体"
+          : "上传 Lovart 主体";
+
+  const handleUploadLovartSubject = async () => {
+    if (!primaryImage?.assetId || primaryImage.uploadStatus !== "saved" || uploadingLovartSubject) return;
+    setUploadingLovartSubject(true);
+    updateImageAsset(id, primaryImage.id, {
+      tag: "character",
+      lovartSubjectStatus: "processing",
+      lovartSubjectError: "",
+    });
+    try {
+      const asset = await uploadLovartSubject(primaryImage.assetId);
+      const metadata = asset.metadata ?? {};
+      updateImageAsset(id, primaryImage.id, {
+        tag: "character",
+        lovartSubjectId: String(metadata.lovartSubjectId || ""),
+        lovartSubjectStatus: String(metadata.lovartSubjectStatus || "pending"),
+        lovartSubjectUrl: String(metadata.lovartSubjectUrl || ""),
+        lovartSubjectChannel: String(metadata.lovartSubjectChannel || "ark_sd2"),
+        lovartSubjectDisplayName: String(metadata.lovartSubjectDisplayName || asset.title || primaryImage.name),
+        lovartSubjectError: String(metadata.lovartSubjectError || ""),
+      });
+    } catch (error) {
+      updateImageAsset(id, primaryImage.id, {
+        tag: "character",
+        lovartSubjectStatus: "failed",
+        lovartSubjectError: error instanceof Error ? error.message : "Lovart 主体上传失败",
+      });
+    } finally {
+      setUploadingLovartSubject(false);
+    }
+  };
   const selectedAnalysisModel =
     typeof nodeData.config.analysisModel === "string" ? nodeData.config.analysisModel : "doubao";
   const analysisSourceNodeId =
@@ -2226,7 +2283,7 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
               nodeType === "videoGeneration" &&
               Boolean(videoTaskId) &&
               (item === "恢复查询结果" || item.includes("等待恢复") || item.includes("任务已提交"));
-            const canManageImages = nodeType === "imageUpload" && item === "管理图片";
+            const canUploadLovartSubject = nodeType === "imageUpload" && item === "上传 Lovart 主体";
             const canPreviewImage =
               (nodeType === "imageUpload" && item === "查看图片") ||
               (isGeneratedImageNode && item === "查看生成图片");
@@ -2395,17 +2452,27 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
               );
             }
 
-            if (canManageImages) {
+            if (canUploadLovartSubject) {
               return (
                 <button
                   key={item}
-                  className="nodrag nopan w-full rounded-lg border border-cyan-300/35 bg-cyan-300/10 px-2.5 py-1.5 text-left text-[11px] font-semibold text-cyan-100 transition hover:border-cyan-200/60 hover:bg-cyan-300/18"
+                  className={cn(
+                    "nodrag nopan flex w-full items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-left text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-55",
+                    lovartSubjectApproved
+                      ? "border-emerald-300/40 bg-emerald-400/12 text-emerald-100"
+                      : lovartSubjectStatus === "failed" || lovartSubjectStatus === "error" || lovartSubjectStatus === "rejected"
+                        ? "border-rose-300/40 bg-rose-400/12 text-rose-100 hover:bg-rose-300/18"
+                        : "border-cyan-300/35 bg-cyan-300/10 text-cyan-100 hover:border-cyan-200/60 hover:bg-cyan-300/18"
+                  )}
+                  disabled={!primaryImage?.assetId || primaryImage.uploadStatus !== "saved" || uploadingLovartSubject || lovartSubjectApproved}
+                  title={primaryImage?.lovartSubjectError || undefined}
                   onClick={(event) => {
                     event.stopPropagation();
-                    setShowImageManager(true);
+                    void handleUploadLovartSubject();
                   }}
                 >
-                  管理图片
+                  {lovartSubjectApproved ? <Check className="size-3.5" /> : <CloudUpload className="size-3.5" />}
+                  {lovartSubjectLabel}
                 </button>
               );
             }

@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from auth import get_current_user
 from database import get_db
-from lovart import LovartAPIError, LovartClient
+from lovart import LovartAPIError, LovartClient, release_lovart_tasks
 from models import Asset, User
 from storage import safe_storage_name, storage
 
@@ -128,6 +128,14 @@ GEMINI_VIDEO_ANALYSIS_PROMPT = """你是专业短视频拆解助手。请直接�
 重点产出可用于复刻拍摄和替换素材的结构化结果。"""
 
 
+class LovartSubjectReference(BaseModel):
+    sourceAssetId: str
+    assetId: str = ""
+    url: str = ""
+    displayName: str = ""
+    channel: str = "ark_sd2"
+
+
 class VideoGenerateRequest(BaseModel):
     prompt: str
     model: str = TOKENOPS_GENERATION_MODEL
@@ -138,6 +146,7 @@ class VideoGenerateRequest(BaseModel):
     watermark: bool = False
     camerafixed: bool = False
     reference_images: list[str] = Field(default_factory=list)
+    subject_assets: list[LovartSubjectReference] = Field(default_factory=list)
 
 
 class VideoSpecParams(BaseModel):
@@ -455,6 +464,39 @@ def _resolve_lovart_reference_images(db: Session, user: User, references: list[s
         if value.startswith("blob:"):
             continue
         resolved.append(value)
+    return resolved
+
+
+def _resolve_lovart_subject_assets(
+    db: Session,
+    user: User,
+    subjects: list[LovartSubjectReference],
+) -> list[dict[str, str]]:
+    resolved: list[dict[str, str]] = []
+    seen: set[str] = set()
+    approved_statuses = {"active", "approved", "done", "passed", "ready", "success", "succeeded", "validated"}
+    for subject in subjects:
+        asset = db.get(Asset, subject.sourceAssetId)
+        if not asset or asset.user_id != user.id:
+            raise HTTPException(status_code=404, detail="人物主体资产不存在")
+        metadata = asset.asset_metadata if isinstance(asset.asset_metadata, dict) else {}
+        subject_id = str(metadata.get("lovartSubjectId") or "").strip()
+        subject_status = str(metadata.get("lovartSubjectStatus") or "").strip().lower()
+        subject_url = str(metadata.get("lovartSubjectUrl") or "").strip()
+        if not subject_id or subject_status not in approved_statuses or not subject_url:
+            raise HTTPException(status_code=400, detail=f"人物主体尚未审核通过：{asset.title}")
+        if subject_id in seen:
+            continue
+        seen.add(subject_id)
+        resolved.append(
+            {
+                "assetId": subject_id,
+                "url": subject_url,
+                "displayName": str(metadata.get("lovartSubjectDisplayName") or asset.title),
+                "channel": str(metadata.get("lovartSubjectChannel") or "ark_sd2"),
+                "type": "subject_image",
+            }
+        )
     return resolved
 
 
@@ -1058,17 +1100,21 @@ def _lovart_video_prompt(payload: VideoGenerateRequest, model: str) -> str:
         constraints.append("不要生成音频。")
     if payload.camerafixed:
         constraints.append("镜头尽量固定，减少不必要的运镜。")
+    if payload.subject_assets:
+        constraints.append("已附加 Lovart 主体素材，生成人物时必须优先使用主体素材保持身份一致。")
 
     return "\n".join(constraints) + f"\n\n视频要求：\n{payload.prompt.strip()}"
 
 
 async def _create_lovart_video(payload: VideoGenerateRequest, db: Session, user: User, model: str) -> dict[str, Any]:
     references = _resolve_lovart_reference_images(db, user, payload.reference_images)
+    subject_assets = _resolve_lovart_subject_assets(db, user, payload.subject_assets)
     request = {
         "model": model,
         "prompt": _lovart_video_prompt(payload, model),
         "output_type": "video",
         "reference_images": references,
+        "subject_assets": subject_assets,
         "ratio": payload.ratio,
         "resolution": payload.resolution,
         "seconds": payload.seconds,
@@ -1103,10 +1149,55 @@ async def _create_lovart_video(payload: VideoGenerateRequest, db: Session, user:
     }
 
 
-async def _get_lovart_video_status(video_id: str) -> dict[str, Any]:
+def _cached_lovart_video_status(
+    video_id: str,
+    db: Optional[Session],
+    user: Optional[User],
+) -> Optional[dict[str, Any]]:
+    if db is None or user is None:
+        return None
+    asset = (
+        db.query(Asset)
+        .filter(
+            Asset.user_id == user.id,
+            Asset.remote_id == video_id,
+            Asset.kind.in_(["project_video", "finished_video"]),
+        )
+        .order_by(Asset.created_at.desc())
+        .first()
+    )
+    if asset is None:
+        return None
+    content_path = f"/api/assets/{asset.id}/public-content"
+    return {
+        "id": video_id,
+        "model": str((asset.asset_metadata or {}).get("model") or "lovart-video"),
+        "status": "completed",
+        "videoUrls": [content_path],
+        "error": None,
+        "raw": {"source": "archived_asset", "asset_id": asset.id},
+        "content_path": content_path,
+    }
+
+
+async def _get_lovart_video_status(
+    video_id: str,
+    db: Optional[Session] = None,
+    user: Optional[User] = None,
+) -> dict[str, Any]:
+    cached_status = _cached_lovart_video_status(video_id, db, user)
+    if cached_status is not None:
+        await release_lovart_tasks(
+            LovartClient(),
+            [_lovart_task_id(video_id)],
+            reason="video_already_archived",
+        )
+        return cached_status
+
     task_id = _lovart_task_id(video_id)
+    client = LovartClient()
     try:
-        task = await LovartClient().get_task(task_id)
+        task = await client.get_task(task_id)
     except LovartAPIError as exc:
         status = exc.status_code if exc.status_code >= 400 else 502
         if exc.status_code == 0:
@@ -1119,6 +1210,8 @@ async def _get_lovart_video_status(video_id: str) -> dict[str, Any]:
     if status == "running" and str(task.get("status") or "").lower() in {"done", "completed", "complete", "success", "succeeded"}:
         error = "Lovart 已完成但未返回视频结果"
         status = "failed"
+    if status == "failed":
+        await release_lovart_tasks(client, [task_id], reason="video_failed")
     return {
         "id": video_id,
         "model": "lovart-video",
@@ -2125,14 +2218,15 @@ async def generate_video(
 @router.get("/generate/{video_id}")
 async def get_generated_video_status(
     video_id: str,
-    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     if video_id.startswith(f"{BDS_PRO_MODEL}:"):
         return await _get_bds_status(video_id)
     if video_id.startswith(WAN_VIDEO_PREFIX):
         return await _get_mulerouter_video_status(video_id)
     if video_id.startswith(LOVART_VIDEO_PREFIX):
-        return await _get_lovart_video_status(video_id)
+        return await _get_lovart_video_status(video_id, db, user)
 
     key = _tokenops_key()
     try:

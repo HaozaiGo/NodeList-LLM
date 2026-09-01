@@ -99,6 +99,8 @@ export function FlowCanvas({
     onEdgesChange,
     onConnect,
     addNode,
+    undo,
+    redo,
     copySelection,
     pasteCopiedSelection,
   } = useFlowStore();
@@ -256,6 +258,17 @@ export function FlowCanvas({
       if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
 
       const key = event.key.toLowerCase();
+      if (key === "z") {
+        const didApply = event.shiftKey ? redo() : undo();
+        if (didApply) event.preventDefault();
+        return;
+      }
+
+      if (key === "y") {
+        if (redo()) event.preventDefault();
+        return;
+      }
+
       if (key === "c") {
         if (copySelection()) event.preventDefault();
         return;
@@ -268,7 +281,7 @@ export function FlowCanvas({
 
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [copySelection, pasteCopiedSelection]);
+  }, [copySelection, pasteCopiedSelection, redo, undo]);
 
   return (
     <div className="h-full flex-1">

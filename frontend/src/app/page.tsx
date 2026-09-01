@@ -208,6 +208,12 @@ type ComposerReferenceItem = {
   url: string;
   label: string;
   tag?: ImageAssetTag;
+  assetId?: string;
+  lovartSubjectId?: string;
+  lovartSubjectStatus?: string;
+  lovartSubjectUrl?: string;
+  lovartSubjectChannel?: string;
+  lovartSubjectDisplayName?: string;
 };
 
 type UpstreamContext = {
@@ -286,6 +292,12 @@ function getReferencesFromNode(node?: { type?: string | null; data: NodeData } |
       url: imageReferenceUrl(image),
       label: image.name || node.data.label,
       tag: normalizeImageReferenceTag(image.tag ?? config.assetTag),
+      assetId: image.assetId,
+      lovartSubjectId: image.lovartSubjectId,
+      lovartSubjectStatus: image.lovartSubjectStatus,
+      lovartSubjectUrl: image.lovartSubjectUrl,
+      lovartSubjectChannel: image.lovartSubjectChannel,
+      lovartSubjectDisplayName: image.lovartSubjectDisplayName,
     }));
   }
 
@@ -807,6 +819,12 @@ function AssetPanel({
         storageKey: asset.storageKey,
         tag: tag === "character" || tag === "scene" || tag === "prop" ? tag : "reference",
         uploadStatus: "saved",
+        lovartSubjectId: String(asset.metadata.lovartSubjectId || ""),
+        lovartSubjectStatus: String(asset.metadata.lovartSubjectStatus || ""),
+        lovartSubjectUrl: String(asset.metadata.lovartSubjectUrl || ""),
+        lovartSubjectChannel: String(asset.metadata.lovartSubjectChannel || ""),
+        lovartSubjectDisplayName: String(asset.metadata.lovartSubjectDisplayName || ""),
+        lovartSubjectError: String(asset.metadata.lovartSubjectError || ""),
       };
       addImageUploadNode([imageItem], nextAssetNodePosition());
       setActiveAssetCategory(null);
@@ -2653,9 +2671,40 @@ function StudioShell() {
     const nodeId = selectedNode.id;
     const overwriteCurrent = selectedNode.data.status === "done";
     const upstreamContext = selectedUpstreamContext;
-    const references = upstreamContext.references
-      .filter((item) => item.kind === "image")
-      .map((item) => item.url) ?? [];
+    const imageReferences = upstreamContext.references.filter((item) => item.kind === "image");
+    const usesLovartSubjects = selectedVideoModel.toLowerCase().includes("seedance-2");
+    const approvedSubjectStatus = (status: string | undefined) =>
+      /^(active|approved|done|passed|ready|success|succeeded|validated)$/i.test(String(status || "").trim());
+    const incompleteSubjects = usesLovartSubjects
+      ? imageReferences.filter(
+          (item) =>
+            (item.lovartSubjectId || item.lovartSubjectStatus) &&
+            (!item.lovartSubjectId || !item.lovartSubjectUrl || !approvedSubjectStatus(item.lovartSubjectStatus))
+        )
+      : [];
+    if (incompleteSubjects.length > 0) {
+      window.alert("Lovart 人物主体仍在审核或上传失败，请在图片节点完成主体上传后再生成视频");
+      return;
+    }
+    const subjectAssets = usesLovartSubjects
+      ? imageReferences
+          .filter(
+            (item) =>
+              item.assetId &&
+              item.lovartSubjectId &&
+              item.lovartSubjectUrl &&
+              approvedSubjectStatus(item.lovartSubjectStatus)
+          )
+          .map((item) => ({
+            sourceAssetId: item.assetId || "",
+            assetId: item.lovartSubjectId || "",
+            url: item.lovartSubjectUrl || "",
+            displayName: item.lovartSubjectDisplayName || item.label,
+            channel: item.lovartSubjectChannel || "ark_sd2",
+          }))
+      : [];
+    const subjectUrlByAssetId = new Map(subjectAssets.map((item) => [item.sourceAssetId, item.url]));
+    const references = imageReferences.map((item) => subjectUrlByAssetId.get(item.assetId || "") || item.url);
     const normalizedVideoParams = normalizeVideoParamsForModel(selectedVideoModel, videoParams);
     updateNodeData(nodeId, {
       status: "running",
@@ -2736,6 +2785,7 @@ function StudioShell() {
         watermark: false,
         camerafixed: normalizedVideoParams.camerafixed,
         reference_images: references,
+        subject_assets: subjectAssets,
         generation_spec: generationSpec,
         overwrite_current: overwriteCurrent,
       });

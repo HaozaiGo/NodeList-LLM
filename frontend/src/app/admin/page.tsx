@@ -3,9 +3,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
+  Activity,
   Ban,
+  Clock3,
   Coins,
+  FileText,
   Gauge,
+  ImageIcon,
   LayoutDashboard,
   Loader2,
   LogOut,
@@ -14,16 +18,19 @@ import {
   Shield,
   Sparkles,
   UserRound,
+  Video,
   WalletCards,
 } from "lucide-react";
 
 import {
   adjustUserCredits,
   getAdminSummary,
+  listAdminModelRuns,
   listAdminUsers,
   listCreditTransactions,
   updateAdminUser,
   type AdminSummary,
+  type AdminModelRun,
   type AdminUser,
   type CreditTransaction,
 } from "@/lib/api";
@@ -38,6 +45,41 @@ function formatDate(value: string | null) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+function formatDuration(value: string | null) {
+  if (!value) return "-";
+  const seconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+function shortTaskId(value: string) {
+  if (!value) return "-";
+  return value.length > 24 ? `${value.slice(0, 12)}...${value.slice(-8)}` : value;
+}
+
+const RUN_STATUS_LABELS: Record<string, string> = {
+  submitting: "提交中",
+  submitted: "已提交",
+  pending: "等待中",
+  queued: "排队中",
+  in_queue: "排队中",
+  running: "运行中",
+  processing: "处理中",
+  generating: "生成中",
+  streaming: "输出中",
+  polling_retry: "查询重试",
+  timeout: "等待恢复",
+};
+
+const RUN_KIND_LABELS = { text: "文本", image: "图片", video: "视频" } as const;
+
+function RunKindIcon({ kind }: { kind: AdminModelRun["kind"] }) {
+  const Icon = kind === "video" ? Video : kind === "image" ? ImageIcon : FileText;
+  return <Icon className="size-4" />;
 }
 
 function StatCard({
@@ -149,6 +191,7 @@ export default function AdminPage() {
   const router = useRouter();
   const { hydrate, hydrated, token, email, logout } = useAuthStore();
   const [summary, setSummary] = useState<AdminSummary | null>(null);
+  const [modelRuns, setModelRuns] = useState<AdminModelRun[]>([]);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [transactions, setTransactions] = useState<CreditTransaction[]>([]);
   const [query, setQuery] = useState("");
@@ -165,12 +208,14 @@ export default function AdminPage() {
     setLoading(true);
     setError("");
     try {
-      const [nextSummary, nextUsers, nextTransactions] = await Promise.all([
+      const [nextSummary, nextModelRuns, nextUsers, nextTransactions] = await Promise.all([
         getAdminSummary(),
+        listAdminModelRuns(),
         listAdminUsers({ q: query, limit: 100 }),
         listCreditTransactions({ limit: 100 }),
       ]);
       setSummary(nextSummary);
+      setModelRuns(nextModelRuns);
       setUsers(nextUsers);
       setTransactions(nextTransactions);
     } catch (err) {
@@ -186,13 +231,30 @@ export default function AdminPage() {
       router.replace("/?auth=login");
       return;
     }
-    void loadAdminData();
+    const timer = window.setTimeout(() => void loadAdminData(), 0);
+    return () => window.clearTimeout(timer);
   }, [hydrated, loadAdminData, router, token]);
+
+  useEffect(() => {
+    if (!hydrated || !token) return;
+    const timer = window.setInterval(() => {
+      void listAdminModelRuns().then(setModelRuns).catch(() => {});
+    }, 10_000);
+    return () => window.clearInterval(timer);
+  }, [hydrated, token]);
 
   const selectedUserTransactions = useMemo(() => {
     if (!creditUser) return transactions;
     return transactions.filter((transaction) => transaction.user_id === creditUser.id);
   }, [creditUser, transactions]);
+
+  const liveModelRuns = useMemo(() => modelRuns.filter((run) => !run.stale), [modelRuns]);
+  const staleModelRuns = modelRuns.length - liveModelRuns.length;
+  const providerBreakdown = useMemo(() => {
+    const counts = new Map<string, number>();
+    liveModelRuns.forEach((run) => counts.set(run.provider, (counts.get(run.provider) ?? 0) + 1));
+    return Array.from(counts.entries()).sort((left, right) => right[1] - left[1]);
+  }, [liveModelRuns]);
 
   const refresh = () => void loadAdminData();
 
@@ -263,11 +325,97 @@ export default function AdminPage() {
             </div>
           )}
 
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
             <StatCard label="用户总数" value={summary?.users ?? "-"} icon={UserRound} tone="cyan" />
             <StatCard label="可用积分池" value={summary?.total_credits ?? "-"} icon={Coins} tone="amber" />
             <StatCard label="画布流程" value={summary?.flows ?? "-"} icon={LayoutDashboard} tone="violet" />
             <StatCard label="制作资产" value={summary?.assets ?? "-"} icon={WalletCards} tone="emerald" />
+            <StatCard label="运行任务" value={liveModelRuns.length} icon={Activity} tone="cyan" />
+          </div>
+
+          <div className="rounded-3xl border border-white/10 bg-[#111119]/86 p-5 shadow-2xl">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <p className="font-mono text-xs uppercase tracking-[0.24em] text-cyan-200">Live Model Runs</p>
+                <h2 className="mt-2 text-2xl font-bold text-white">模型运行情况</h2>
+              </div>
+              <div className="flex items-center gap-3 text-xs">
+                <span className="inline-flex items-center gap-2 text-emerald-200">
+                  <span className="size-2 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.8)]" />
+                  {liveModelRuns.length} 运行中
+                </span>
+                {staleModelRuns > 0 && (
+                  <span className="inline-flex items-center gap-2 text-amber-200">
+                    <span className="size-2 rounded-full bg-amber-400" />
+                    {staleModelRuns} 失联
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="mt-5 overflow-x-auto">
+              <table className="w-full min-w-[940px] border-separate border-spacing-y-2 text-left text-sm">
+                <thead className="text-xs uppercase tracking-wide text-zinc-500">
+                  <tr>
+                    <th className="px-4 py-2">状态</th>
+                    <th className="px-4 py-2">用户</th>
+                    <th className="px-4 py-2">类型</th>
+                    <th className="px-4 py-2">模型</th>
+                    <th className="px-4 py-2">画布</th>
+                    <th className="px-4 py-2">时长</th>
+                    <th className="px-4 py-2">任务 ID</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {loading ? (
+                    <tr>
+                      <td colSpan={7} className="px-4 py-10 text-center text-zinc-500">
+                        <Loader2 className="mx-auto size-5 animate-spin" />
+                      </td>
+                    </tr>
+                  ) : modelRuns.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="px-4 py-10 text-center text-zinc-500">当前没有模型任务运行</td>
+                    </tr>
+                  ) : (
+                    modelRuns.map((run) => (
+                      <tr key={`${run.flow_id}:${run.node_id}:${run.task_id}`} className="bg-white/[0.045]">
+                        <td className="rounded-l-2xl px-4 py-4">
+                          <span className={cn("inline-flex items-center gap-2 font-semibold", run.stale ? "text-amber-200" : "text-emerald-200")}>
+                            <span className={cn("size-2 rounded-full", run.stale ? "bg-amber-400" : "bg-emerald-400 animate-pulse")} />
+                            {run.stale ? "失联" : RUN_STATUS_LABELS[run.status] || run.status}
+                          </span>
+                        </td>
+                        <td className="max-w-52 px-4 py-4">
+                          <p className="truncate font-semibold text-white" title={run.user_email}>{run.user_email}</p>
+                          <p className="mt-1 text-xs text-zinc-500">{run.node_label}</p>
+                        </td>
+                        <td className="px-4 py-4">
+                          <span className="inline-flex items-center gap-2 text-zinc-300">
+                            <RunKindIcon kind={run.kind} />
+                            {RUN_KIND_LABELS[run.kind]}
+                          </span>
+                        </td>
+                        <td className="max-w-56 px-4 py-4">
+                          <p className="truncate font-semibold text-white" title={run.model}>{run.model}</p>
+                          <p className="mt-1 text-xs text-cyan-200">{run.provider}</p>
+                        </td>
+                        <td className="max-w-44 px-4 py-4">
+                          <p className="truncate text-zinc-300" title={run.flow_name}>{run.flow_name}</p>
+                          <p className="mt-1 font-mono text-[11px] text-zinc-600">{run.flow_id.slice(0, 8)}</p>
+                        </td>
+                        <td className="px-4 py-4 font-mono text-zinc-300">
+                          <span className="inline-flex items-center gap-2"><Clock3 className="size-3.5 text-zinc-500" />{formatDuration(run.started_at)}</span>
+                        </td>
+                        <td className="rounded-r-2xl px-4 py-4 font-mono text-xs text-zinc-500" title={run.task_id}>
+                          {shortTaskId(run.task_id)}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
 
           <div className="rounded-3xl border border-white/10 bg-[#111119]/86 p-5 shadow-2xl">
@@ -384,8 +532,20 @@ export default function AdminPage() {
               </span>
               <div>
                 <h2 className="text-lg font-bold text-white">生成状态</h2>
-                <p className="text-xs text-zinc-500">{summary?.active_users ?? "-"} active / {summary?.disabled_users ?? "-"} disabled</p>
+                <p className="text-xs text-zinc-500">{liveModelRuns.length} running / {staleModelRuns} stale</p>
               </div>
+            </div>
+            <div className="mt-5 space-y-3">
+              {providerBreakdown.length === 0 ? (
+                <p className="text-sm text-zinc-500">暂无运行中的模型</p>
+              ) : (
+                providerBreakdown.map(([provider, count]) => (
+                  <div key={provider} className="flex items-center justify-between border-b border-white/8 pb-3 text-sm last:border-0 last:pb-0">
+                    <span className="text-zinc-300">{provider}</span>
+                    <span className="font-mono font-bold text-cyan-200">{count}</span>
+                  </div>
+                ))
+              )}
             </div>
           </div>
 

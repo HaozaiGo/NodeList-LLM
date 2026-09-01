@@ -44,6 +44,8 @@ interface FlowState {
   onEdgesChange: OnEdgesChange;
   onConnect: OnConnect;
   addNode: (node: Node<NodeData>) => void;
+  undo: () => boolean;
+  redo: () => boolean;
   copySelection: () => boolean;
   pasteCopiedSelection: () => boolean;
   updateNodeConfig: (id: string, config: Record<string, unknown>) => void;
@@ -92,11 +94,101 @@ const activeVideoGenerationKeys = new Set<string>();
 const activeVideoRecoveryNodeIds = new Set<string>();
 const activeImageRecoveryNodeIds = new Set<string>();
 const imageRecoveryAttempts = new Map<string, number>();
+const imageRecoveryFailures = new Map<string, number>();
 const doubaoProgressTimers = new Map<string, ReturnType<typeof setInterval>>();
 let selectionClipboard: { nodes: Node<NodeData>[]; edges: Edge[] } | null = null;
 let selectionPasteCount = 0;
+type FlowHistorySnapshot = { nodes: Node<NodeData>[]; edges: Edge[] };
+const undoStack: FlowHistorySnapshot[] = [];
+const redoStack: FlowHistorySnapshot[] = [];
+const maxHistoryEntries = 80;
+let suppressEdgeRemoveHistoryUntil = 0;
 const videoFileDbName = "nodelist-video-files";
 const videoFileStoreName = "videos";
+const generationPollStoragePrefix = "nodelist:generation-poll:";
+const generationPollJitter = 0.2;
+
+function generationPollBaseDelay(startedAt: number, failureCount: number) {
+  if (failureCount > 0) return Math.min(60_000, 10_000 * 2 ** Math.min(failureCount - 1, 3));
+  const elapsed = Date.now() - startedAt;
+  if (elapsed < 30_000) return 8_000;
+  if (elapsed < 180_000) return 12_000;
+  return 20_000;
+}
+
+function generationStartedAt(value: unknown) {
+  if (typeof value !== "string" || !value.trim()) return Date.now();
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+async function waitUntilGenerationPollingAllowed() {
+  if (typeof window === "undefined") return;
+  while (document.visibilityState === "hidden" || !navigator.onLine) {
+    await new Promise<void>((resolve) => {
+      const resume = () => {
+        if (document.visibilityState === "hidden" || !navigator.onLine) return;
+        document.removeEventListener("visibilitychange", resume);
+        window.removeEventListener("online", resume);
+        resolve();
+      };
+      document.addEventListener("visibilitychange", resume);
+      window.addEventListener("online", resume);
+    });
+  }
+}
+
+async function waitForGenerationPoll(startedAt: number, failureCount: number, immediate = false) {
+  await waitUntilGenerationPollingAllowed();
+  const baseDelay = immediate ? 250 : generationPollBaseDelay(startedAt, failureCount);
+  const jitterMultiplier = immediate ? 1 : 1 - generationPollJitter + Math.random() * generationPollJitter * 2;
+  await new Promise((resolve) => setTimeout(resolve, Math.round(baseDelay * jitterMultiplier)));
+  await waitUntilGenerationPollingAllowed();
+}
+
+type GenerationPollResult<T> = { executed: true; value: T } | { executed: false };
+
+async function runDeduplicatedGenerationPoll<T>(
+  taskId: string,
+  minimumGapMs: number,
+  request: () => Promise<T>
+): Promise<GenerationPollResult<T>> {
+  const execute = async (): Promise<GenerationPollResult<T>> => {
+    const storageKey = `${generationPollStoragePrefix}${taskId}`;
+    const now = Date.now();
+    try {
+      const previousPoll = Number(window.localStorage.getItem(storageKey) || 0);
+      if (previousPoll > 0 && now - previousPoll < minimumGapMs) return { executed: false };
+      window.localStorage.setItem(storageKey, String(now));
+    } catch {
+      // Storage can be unavailable in private contexts; the browser lock still prevents simultaneous requests.
+    }
+    try {
+      return { executed: true, value: await request() };
+    } finally {
+      try {
+        window.localStorage.setItem(storageKey, String(Date.now()));
+      } catch {
+        // Ignore storage failures; request serialization still works in browsers with Web Locks support.
+      }
+    }
+  };
+
+  if (typeof navigator !== "undefined" && navigator.locks) {
+    return navigator.locks.request(`nodelist-generation-poll:${taskId}`, execute);
+  }
+  return execute();
+}
+
+function scheduleImageGenerationRecovery(
+  get: () => FlowState,
+  nodeId: string,
+  startedAt: number,
+  failureCount: number
+) {
+  if (typeof window === "undefined") return;
+  void waitForGenerationPoll(startedAt, failureCount).then(() => void get().recoverImageGeneration(nodeId));
+}
 
 function openVideoFileDb(): Promise<IDBDatabase | null> {
   if (typeof window === "undefined" || !("indexedDB" in window)) {
@@ -196,9 +288,7 @@ function imageGroupMetric(images: ImageAssetItem[]) {
 function imageGroupItems(images: ImageAssetItem[]) {
   return [
     `${images.length} 张图片已上传`,
-    "管理图片",
-    "分类为人物 / 场景 / 道具",
-    "生成参考资产",
+    "上传 Lovart 主体",
   ];
 }
 
@@ -509,13 +599,22 @@ function imageGenerationTaskId(node: Node<NodeData>) {
   return typeof node.data.config.taskId === "string" ? node.data.config.taskId.trim() : "";
 }
 
+function isRecoverableImageGenerationFailure(node: Node<NodeData>) {
+  if (!imageGenerationTaskId(node)) return false;
+  const error = String(node.data.config.error || "");
+  const generationStatus = String(node.data.config.generationStatus || "").toLowerCase();
+  return generationStatus === "polling_retry" || /状态查询失败|恢复查询失败|图片生成状态查询失败/.test(error);
+}
+
 function pendingImageGenerationNodeIds(nodes: Node<NodeData>[]) {
   return nodes
     .filter((node) => {
       if (!isImageAssetGenerationNode(node)) return false;
-      if (node.data.status === "done" || node.data.status === "error") return false;
+      if (node.data.status === "done") return false;
+      if (node.data.status === "error" && !isRecoverableImageGenerationFailure(node)) return false;
       const configStatus = String(node.data.config.generationStatus || "").toLowerCase();
-      if (["completed", "failed"].includes(configStatus)) return false;
+      if (configStatus === "completed") return false;
+      if (configStatus === "failed" && !isRecoverableImageGenerationFailure(node)) return false;
       return Boolean(imageGenerationTaskId(node)) || configStatus === "submitting";
     })
     .map((node) => node.id);
@@ -528,7 +627,8 @@ function queueImageGenerationRecovery(get: () => FlowState, nodeIds: string[]) {
     nodeIds.forEach((nodeId) => {
       const node = state.nodes.find((item) => item.id === nodeId);
       if (!node || !isImageAssetGenerationNode(node)) return;
-      if (node.data.status === "done" || node.data.status === "error") return;
+      if (node.data.status === "done") return;
+      if (node.data.status === "error" && !isRecoverableImageGenerationFailure(node)) return;
       void state.recoverImageGeneration(nodeId);
     });
   }, 800);
@@ -606,6 +706,39 @@ function curvedEdges(edges: Edge[]) {
 function cloneFlowValue<T>(value: T): T {
   if (typeof structuredClone === "function") return structuredClone(value);
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function flowSnapshot(nodes: Node<NodeData>[], edges: Edge[]): FlowHistorySnapshot {
+  return {
+    nodes: cloneFlowValue(nodes),
+    edges: cloneFlowValue(curvedEdges(edges)),
+  };
+}
+
+function sameFlowSnapshot(a: FlowHistorySnapshot, b: FlowHistorySnapshot) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function pushUndoSnapshot(get: () => FlowState) {
+  const snapshot = flowSnapshot(get().nodes, get().edges);
+  const previous = undoStack[undoStack.length - 1];
+  if (!previous || !sameFlowSnapshot(previous, snapshot)) {
+    undoStack.push(snapshot);
+    if (undoStack.length > maxHistoryEntries) undoStack.shift();
+  }
+  redoStack.length = 0;
+}
+
+function restoreFlowSnapshot(snapshot: FlowHistorySnapshot, set: (state: Partial<FlowState>) => void, get: () => FlowState) {
+  set({
+    nodes: cloneFlowValue(snapshot.nodes),
+    edges: curvedEdges(cloneFlowValue(snapshot.edges)),
+  });
+  scheduleAutoSave(get);
+}
+
+function hasRemoveChange(changes: { type: string }[]) {
+  return changes.some((change) => change.type === "remove");
 }
 
 function copiedNodeId(nodeId: string, pasteStamp: string, index: number) {
@@ -872,20 +1005,43 @@ export const useFlowStore = create<FlowState>((set, get) => ({
   saveError: null,
 
   onNodesChange: (changes) => {
+    if (hasRemoveChange(changes)) {
+      pushUndoSnapshot(get);
+      suppressEdgeRemoveHistoryUntil = Date.now() + 120;
+    }
     set({ nodes: applyNodeChanges(changes, get().nodes) as Node<NodeData>[] });
     scheduleAutoSave(get);
   },
   onEdgesChange: (changes) => {
+    if (hasRemoveChange(changes) && Date.now() > suppressEdgeRemoveHistoryUntil) {
+      pushUndoSnapshot(get);
+    }
     set({ edges: curvedEdges(applyEdgeChanges(changes, get().edges)) });
     scheduleAutoSave(get);
   },
   onConnect: (connection) => {
+    pushUndoSnapshot(get);
     set({ edges: curvedEdges(addEdge({ ...connection, type: "default" }, get().edges)) });
     scheduleAutoSave(get);
   },
   addNode: (node) => {
+    pushUndoSnapshot(get);
     set({ nodes: [...get().nodes, node] });
     scheduleAutoSave(get);
+  },
+  undo: () => {
+    const snapshot = undoStack.pop();
+    if (!snapshot) return false;
+    redoStack.push(flowSnapshot(get().nodes, get().edges));
+    restoreFlowSnapshot(snapshot, set, get);
+    return true;
+  },
+  redo: () => {
+    const snapshot = redoStack.pop();
+    if (!snapshot) return false;
+    undoStack.push(flowSnapshot(get().nodes, get().edges));
+    restoreFlowSnapshot(snapshot, set, get);
+    return true;
   },
   copySelection: () => {
     const selectedNodeIds = new Set(get().nodes.filter((node) => node.selected).map((node) => node.id));
@@ -902,6 +1058,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
   },
   pasteCopiedSelection: () => {
     if (!selectionClipboard || selectionClipboard.nodes.length === 0) return false;
+    pushUndoSnapshot(get);
 
     selectionPasteCount += 1;
     const pasteStamp = `${Date.now()}-${selectionPasteCount}`;
@@ -1623,6 +1780,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
       (typeof node.data.config.model === "string" ? node.data.config.model : "") ||
       "doubao-seed-2-0-pro-260215";
     const modelLabel = textGenerationModelLabel(selectedModel);
+    const taskCreatedAt = new Date().toISOString();
     const prompt = buildTextGenerationPrompt(current.nodes, current.edges, nodeId, userPrompt);
     const payload: TextGeneratePayload = {
       prompt_text: prompt,
@@ -1643,6 +1801,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
               userPrompt,
               generatedText: text,
               generationStatus: "streaming",
+              taskCreatedAt,
             },
             items: [preview, "直接流式生成", "引用上游素材"],
           },
@@ -1660,6 +1819,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
               promptText: prompt,
               userPrompt,
               generationStatus: "streaming",
+              taskCreatedAt,
             },
             items: [statusText, "等待模型返回首段内容", "引用上游素材"],
           },
@@ -1768,13 +1928,45 @@ export const useFlowStore = create<FlowState>((set, get) => ({
       });
       scheduleAutoSave(get);
 
+      let pollFailures = 0;
+      const pollStartedAt = Date.now();
       for (let attempt = 0; attempt < 36; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 5000));
-        const status = await getImageGenerationStatus(created.id, {
-          model: payload.model,
-          flowId: payload.flowId,
-          nodeId,
-        });
+        await waitForGenerationPoll(pollStartedAt, pollFailures);
+        let status;
+        try {
+          const poll = await runDeduplicatedGenerationPoll(
+            created.id,
+            generationPollBaseDelay(pollStartedAt, pollFailures) * 0.75,
+            () => getImageGenerationStatus(created.id, {
+              model: payload.model,
+              flowId: payload.flowId,
+              nodeId,
+            })
+          );
+          if (!poll.executed) continue;
+          status = poll.value;
+          pollFailures = 0;
+        } catch (pollError) {
+          pollFailures += 1;
+          const message = pollError instanceof Error ? pollError.message : "图片生成状态查询失败";
+          set({
+            nodes: patchNodes(get().nodes, {
+              [nodeId]: {
+                status: pollFailures >= 6 ? "queued" : "running",
+                metric: pollFailures >= 6 ? "等待恢复查询" : "状态查询重试中",
+                config: {
+                  taskId: created.id,
+                  generationStatus: "polling_retry",
+                  error: message,
+                },
+                items: ["任务已提交，正在恢复状态查询", `任务 ID：${created.id}`, outputSummary],
+              },
+            }),
+          });
+          scheduleAutoSave(get);
+          if (pollFailures >= 6) return;
+          continue;
+        }
 
         if (status.status === "completed" && status.assets.length > 0) {
           const images: ImageAssetItem[] = status.assets.map((asset, index) => ({
@@ -1892,6 +2084,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
     const outputSummary = generatedAssetSummary(config) || "Lovart 图片生成";
     const outputTag = normalizeImageAssetTag(config.assetTag);
     const model = typeof config.model === "string" ? config.model : undefined;
+    const pollStartedAt = generationStartedAt(config.taskCreatedAt ?? config.submittedAt);
 
     if (!taskId) {
       if (generationStatus === "submitting") {
@@ -1928,11 +2121,23 @@ export const useFlowStore = create<FlowState>((set, get) => ({
       });
       scheduleAutoSave(get);
 
-      const status = await getImageGenerationStatus(taskId, {
-        model,
-        flowId: get().flowId,
-        nodeId,
-      });
+      await waitUntilGenerationPollingAllowed();
+      const failureCount = imageRecoveryFailures.get(nodeId) ?? 0;
+      const poll = await runDeduplicatedGenerationPoll(
+        taskId,
+        generationPollBaseDelay(pollStartedAt, failureCount) * 0.75,
+        () => getImageGenerationStatus(taskId, {
+          model,
+          flowId: get().flowId,
+          nodeId,
+        })
+      );
+      if (!poll.executed) {
+        scheduleImageGenerationRecovery(get, nodeId, pollStartedAt, failureCount);
+        return;
+      }
+      const status = poll.value;
+      imageRecoveryFailures.delete(nodeId);
 
       if (status.status === "completed" && status.assets.length > 0) {
         const images: ImageAssetItem[] = status.assets.map((asset, index) => ({
@@ -1975,6 +2180,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
         });
         scheduleAutoSave(get);
         imageRecoveryAttempts.delete(nodeId);
+        imageRecoveryFailures.delete(nodeId);
         return;
       }
 
@@ -1992,6 +2198,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
         });
         scheduleAutoSave(get);
         imageRecoveryAttempts.delete(nodeId);
+        imageRecoveryFailures.delete(nodeId);
         return;
       }
 
@@ -2008,12 +2215,12 @@ export const useFlowStore = create<FlowState>((set, get) => ({
         }),
       });
       scheduleAutoSave(get);
-      if (attempts < 36 && typeof window !== "undefined") {
-        window.setTimeout(() => void get().recoverImageGeneration(nodeId), 5000);
-      }
+      if (attempts < 36) scheduleImageGenerationRecovery(get, nodeId, pollStartedAt, 0);
     } catch (error) {
       const attempts = (imageRecoveryAttempts.get(nodeId) ?? 0) + 1;
       imageRecoveryAttempts.set(nodeId, attempts);
+      const failures = (imageRecoveryFailures.get(nodeId) ?? 0) + 1;
+      imageRecoveryFailures.set(nodeId, failures);
       const message = error instanceof Error ? error.message : "图片生成状态查询失败";
       set({
         nodes: patchNodes(get().nodes, {
@@ -2026,9 +2233,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
         }),
       });
       scheduleAutoSave(get);
-      if (attempts < 36 && typeof window !== "undefined") {
-        window.setTimeout(() => void get().recoverImageGeneration(nodeId), 5000);
-      }
+      if (attempts < 36) scheduleImageGenerationRecovery(get, nodeId, pollStartedAt, failures);
     } finally {
       activeImageRecoveryNodeIds.delete(nodeId);
     }
@@ -2122,6 +2327,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
             selectedScript: payload.generation_spec?.selected_script ?? "",
             videoUrl: "",
             taskId: "",
+            taskCreatedAt: new Date().toISOString(),
             assetId: "",
             projectVideoAssetId: "",
             assetSaveStatus: "",
@@ -2163,11 +2369,18 @@ export const useFlowStore = create<FlowState>((set, get) => ({
       scheduleAutoSave(get);
 
       let pollFailures = 0;
+      const pollStartedAt = Date.now();
       for (let index = 0; index < 90; index += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 5000));
+        await waitForGenerationPoll(pollStartedAt, pollFailures);
         let status;
         try {
-          status = await getVideoGenerationStatus(created.id);
+          const poll = await runDeduplicatedGenerationPoll(
+            created.id,
+            generationPollBaseDelay(pollStartedAt, pollFailures) * 0.75,
+            () => getVideoGenerationStatus(created.id)
+          );
+          if (!poll.executed) continue;
+          status = poll.value;
           pollFailures = 0;
         } catch (pollError) {
           pollFailures += 1;
@@ -2405,11 +2618,18 @@ export const useFlowStore = create<FlowState>((set, get) => ({
       scheduleAutoSave(get);
 
       let pollFailures = 0;
+      const pollStartedAt = generationStartedAt(node.data.config.taskCreatedAt);
       for (let index = 0; index < 90; index += 1) {
-        await new Promise((resolve) => setTimeout(resolve, index === 0 ? 250 : 5000));
+        await waitForGenerationPoll(pollStartedAt, pollFailures, index === 0);
         let status;
         try {
-          status = await getVideoGenerationStatus(taskId);
+          const poll = await runDeduplicatedGenerationPoll(
+            taskId,
+            generationPollBaseDelay(pollStartedAt, pollFailures) * 0.75,
+            () => getVideoGenerationStatus(taskId)
+          );
+          if (!poll.executed) continue;
+          status = poll.value;
           pollFailures = 0;
         } catch (error) {
           pollFailures += 1;

@@ -122,8 +122,17 @@ export interface VideoGeneratePayload {
   watermark: boolean;
   camerafixed: boolean;
   reference_images?: string[];
+  subject_assets?: LovartSubjectReference[];
   generation_spec?: VideoGenerationSpec;
   overwrite_current?: boolean;
+}
+
+export interface LovartSubjectReference {
+  sourceAssetId: string;
+  assetId: string;
+  url: string;
+  displayName: string;
+  channel: string;
 }
 
 export interface VideoGenerateResponse {
@@ -315,6 +324,24 @@ export interface AdminUser {
   assets: number;
 }
 
+export interface AdminModelRun {
+  user_id: string;
+  user_email: string;
+  flow_id: string;
+  flow_name: string;
+  node_id: string;
+  node_type: string;
+  node_label: string;
+  kind: "text" | "image" | "video";
+  provider: string;
+  model: string;
+  status: string;
+  task_id: string;
+  started_at: string | null;
+  updated_at: string | null;
+  stale: boolean;
+}
+
 export interface CreditTransaction {
   id: string;
   user_id: string;
@@ -443,6 +470,13 @@ export async function updateAsset(
     body: JSON.stringify(payload),
   });
   return readJsonOrThrow<AssetRecord>(r, "资产更新失败");
+}
+
+export async function uploadLovartSubject(assetId: string): Promise<AssetRecord> {
+  const r = await fetchWithAuthRetry(`${BASE}/api/assets/${encodeURIComponent(assetId)}/lovart-subject`, {
+    method: "POST",
+  });
+  return readJsonOrThrow<AssetRecord>(r, "Lovart 主体上传失败");
 }
 
 export async function uploadAsset(payload: UploadAssetPayload): Promise<AssetRecord> {
@@ -576,6 +610,14 @@ export async function listAdminUsers(params: { q?: string; limit?: number; offse
   const suffix = query.toString() ? `?${query.toString()}` : "";
   const r = await fetchWithAuthRetry(`${BASE}/api/admin/users${suffix}`);
   return readJsonOrThrow<AdminUser[]>(r, "后台用户列表获取失败");
+}
+
+export async function listAdminModelRuns(params: { includeStale?: boolean } = {}): Promise<AdminModelRun[]> {
+  const query = new URLSearchParams();
+  if (params.includeStale === false) query.set("include_stale", "false");
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  const r = await fetchWithAuthRetry(`${BASE}/api/admin/model-runs${suffix}`);
+  return readJsonOrThrow<AdminModelRun[]>(r, "模型运行情况获取失败");
 }
 
 export async function updateAdminUser(

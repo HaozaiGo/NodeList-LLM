@@ -1,6 +1,6 @@
 import uuid
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -61,6 +61,143 @@ class CreditTransactionOut(BaseModel):
 class CreditAdjustResponse(BaseModel):
     user: AdminUserOut
     transaction: CreditTransactionOut
+
+
+class AdminModelRunOut(BaseModel):
+    user_id: str
+    user_email: str
+    flow_id: str
+    flow_name: str
+    node_id: str
+    node_type: str
+    node_label: str
+    kind: str
+    provider: str
+    model: str
+    status: str
+    task_id: str
+    started_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    stale: bool
+
+
+ACTIVE_MODEL_RUN_STATUSES = {
+    "submitting",
+    "submitted",
+    "pending",
+    "queued",
+    "in_queue",
+    "running",
+    "processing",
+    "generating",
+    "streaming",
+    "polling_retry",
+    "timeout",
+}
+MODEL_RUN_STALE_AFTER = timedelta(minutes=10)
+
+
+def _node_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _node_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _node_datetime(*values: Any) -> Optional[datetime]:
+    for value in values:
+        if isinstance(value, datetime):
+            return value
+        text_value = _node_text(value)
+        if not text_value:
+            continue
+        try:
+            return datetime.fromisoformat(text_value.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+    return None
+
+
+def _aware_datetime(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def _model_run_kind(node_type: str) -> str:
+    if node_type == "videoGeneration":
+        return "video"
+    if node_type in {"characterAsset", "sceneAsset", "propAsset"}:
+        return "image"
+    return "text"
+
+
+def _model_run_provider(kind: str, model: str, task_id: str) -> str:
+    normalized_model = model.lower()
+    normalized_task_id = task_id.lower()
+    if normalized_task_id.startswith(("lovart:", "lovart-batch:")) or kind == "image":
+        return "Lovart"
+    if normalized_task_id.startswith("wan:") or normalized_model.startswith("wan"):
+        return "MuleRouter"
+    if normalized_task_id.startswith("bds-pro:") or normalized_model == "bds-pro":
+        return "BDS"
+    if normalized_model.startswith("qwen"):
+        return "DashScope"
+    if normalized_model.startswith("doubao"):
+        return "Volcengine"
+    return "Lovart" if kind == "video" and normalized_model.startswith("seedance-2") else "Other"
+
+
+def _extract_model_runs(
+    flow: Flow,
+    user: User,
+    *,
+    now: Optional[datetime] = None,
+) -> list[AdminModelRunOut]:
+    runs: list[AdminModelRunOut] = []
+    current_time = _aware_datetime(now or datetime.now(timezone.utc))
+    flow_updated_at = _node_datetime(flow.updated_at)
+    stale = flow_updated_at is None or current_time - _aware_datetime(flow_updated_at) > MODEL_RUN_STALE_AFTER
+
+    for raw_node in flow.nodes or []:
+        node = _node_dict(raw_node)
+        data = _node_dict(node.get("data"))
+        config = _node_dict(data.get("config"))
+        run_status = _node_text(config.get("generationStatus") or config.get("status")).lower()
+        if run_status not in ACTIVE_MODEL_RUN_STATUSES:
+            continue
+
+        node_type = _node_text(node.get("type"))
+        model = _node_text(config.get("model"))
+        task_id = _node_text(config.get("taskId"))
+        if not model and not task_id:
+            continue
+        kind = _model_run_kind(node_type)
+        started_at = _node_datetime(
+            config.get("taskCreatedAt"),
+            config.get("submittedAt"),
+            config.get("imageTaskUpdatedAt"),
+            flow.created_at,
+        )
+        runs.append(
+            AdminModelRunOut(
+                user_id=user.id,
+                user_email=user.email,
+                flow_id=flow.id,
+                flow_name=flow.name,
+                node_id=_node_text(node.get("id")),
+                node_type=node_type,
+                node_label=_node_text(data.get("label")) or node_type,
+                kind=kind,
+                provider=_model_run_provider(kind, model, task_id),
+                model=model or "Unknown",
+                status=run_status,
+                task_id=task_id,
+                started_at=started_at,
+                updated_at=flow_updated_at,
+                stale=stale,
+            )
+        )
+    return runs
 
 
 def _user_out(db: Session, user: User) -> AdminUserOut:
@@ -128,6 +265,28 @@ def list_users(
         query = query.filter(User.email.ilike(f"%{q.strip()}%"))
     users = query.offset(offset).limit(limit).all()
     return [_user_out(db, user) for user in users]
+
+
+@router.get("/model-runs", response_model=list[AdminModelRunOut])
+def list_model_runs(
+    include_stale: bool = True,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_admin),
+):
+    runs: list[AdminModelRunOut] = []
+    rows = db.query(Flow, User).join(User, Flow.user_id == User.id).all()
+    now = datetime.now(timezone.utc)
+    for flow, user in rows:
+        runs.extend(_extract_model_runs(flow, user, now=now))
+    if not include_stale:
+        runs = [run for run in runs if not run.stale]
+    return sorted(
+        runs,
+        key=lambda run: (
+            run.stale,
+            -(_aware_datetime(run.updated_at).timestamp() if run.updated_at else 0),
+        ),
+    )
 
 
 @router.patch("/users/{user_id}", response_model=AdminUserOut)

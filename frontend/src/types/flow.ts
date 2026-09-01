@@ -31,6 +31,12 @@ export interface ImageAssetItem {
   tag: ImageAssetTag;
   uploadStatus?: "uploading" | "saved" | "failed";
   error?: string;
+  lovartSubjectId?: string;
+  lovartSubjectStatus?: string;
+  lovartSubjectUrl?: string;
+  lovartSubjectChannel?: string;
+  lovartSubjectDisplayName?: string;
+  lovartSubjectError?: string;
 }
 
 export interface NodeData extends Record<string, unknown> {

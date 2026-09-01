@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Optional, Union
 
 import httpx
@@ -12,7 +13,8 @@ from sqlalchemy.orm import Session
 
 from auth import get_current_user
 from database import get_db
-from api.routers.video import LOVART_VIDEO_PREFIX, _download_lovart_video
+from api.routers.video import LOVART_VIDEO_PREFIX, _download_lovart_video, _lovart_task_id
+from lovart import LovartClient, release_lovart_tasks
 from models import Asset, Flow, User
 from storage import object_key_for_asset, safe_storage_name, storage
 
@@ -32,6 +34,16 @@ SCRIPT_UPLOAD_MIME_TYPES = {
     "text/markdown",
     "text/plain",
     "text/vtt",
+}
+LOVART_SUBJECT_APPROVED_STATUSES = {
+    "active",
+    "approved",
+    "done",
+    "passed",
+    "ready",
+    "success",
+    "succeeded",
+    "validated",
 }
 
 
@@ -132,6 +144,19 @@ def _require_supported_upload(file: UploadFile, kind: str) -> None:
         raise HTTPException(status_code=400, detail="请上传文本剧本文件")
 
 
+def _lovart_subject_metadata(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "tag": "character",
+        "lovartSubjectId": str(result.get("asset_id") or "").strip(),
+        "lovartSubjectStatus": str(result.get("status") or "pending").strip().lower(),
+        "lovartSubjectUrl": str(result.get("asset_url") or "").strip(),
+        "lovartSubjectChannel": str(result.get("channel") or "ark_sd2").strip(),
+        "lovartSubjectDisplayName": str(result.get("display_name") or "").strip(),
+        "lovartSubjectError": "",
+        "lovartSubjectUpdatedAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 async def _download_tokenops_video(task_id: str) -> tuple[bytes, str]:
     key = _tokenops_key()
     try:
@@ -226,6 +251,12 @@ async def _create_video_record(
         .first()
     )
     if existing:
+        if existing.provider == "lovart" and payload.taskId.startswith(LOVART_VIDEO_PREFIX):
+            await release_lovart_tasks(
+                LovartClient(),
+                [_lovart_task_id(payload.taskId)],
+                reason="video_already_archived",
+            )
         return asset_to_dict(existing)
 
     asset_id = str(uuid.uuid4())
@@ -275,6 +306,12 @@ async def _create_video_record(
     db.add(asset)
     db.commit()
     db.refresh(asset)
+    if provider == "lovart" and payload.taskId.startswith(LOVART_VIDEO_PREFIX):
+        await release_lovart_tasks(
+            LovartClient(),
+            [_lovart_task_id(payload.taskId)],
+            reason="video_archived",
+        )
     return asset_to_dict(asset)
 
 
@@ -361,6 +398,63 @@ async def upload_asset(
         remote_id=None,
         asset_metadata={"tag": tag or ""},
     )
+    db.add(asset)
+    db.commit()
+    db.refresh(asset)
+    return asset_to_dict(asset)
+
+
+@router.post("/{asset_id}/lovart-subject", response_model=AssetOut)
+async def upload_lovart_subject(
+    asset_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    asset = db.get(Asset, asset_id)
+    if not asset or asset.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if not asset.mime_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Lovart 主体仅支持图片素材")
+
+    metadata = asset.asset_metadata if isinstance(asset.asset_metadata, dict) else {}
+    subject_id = str(metadata.get("lovartSubjectId") or "").strip()
+    subject_status = str(metadata.get("lovartSubjectStatus") or "").strip().lower()
+    subject_url = str(metadata.get("lovartSubjectUrl") or "").strip()
+    if subject_id and subject_url and subject_status in LOVART_SUBJECT_APPROVED_STATUSES:
+        return asset_to_dict(asset)
+
+    client = LovartClient()
+    try:
+        if subject_id and subject_status not in {"failed", "error", "rejected"}:
+            result = await client.get_subject_status(
+                subject_id,
+                channel=str(metadata.get("lovartSubjectChannel") or "ark_sd2"),
+                display_name=str(metadata.get("lovartSubjectDisplayName") or asset.title),
+            )
+        else:
+            path = storage.ensure_local(asset.storage_key)
+            result = await client.upload_subject_image(
+                path.read_bytes(),
+                content_type=asset.mime_type,
+                display_name=asset.title,
+            )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="人物图片文件不存在") from exc
+    except LovartAPIError as exc:
+        message = exc.detail or "Lovart 主体上传失败"
+        asset.asset_metadata = {
+            **metadata,
+            "tag": "character",
+            "lovartSubjectStatus": "failed",
+            "lovartSubjectError": message,
+            "lovartSubjectUpdatedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        db.add(asset)
+        db.commit()
+        status_code = exc.status_code if 400 <= exc.status_code < 600 else 502
+        raise HTTPException(status_code=status_code, detail=message) from exc
+
+    asset.asset_metadata = {**metadata, **_lovart_subject_metadata(result)}
     db.add(asset)
     db.commit()
     db.refresh(asset)

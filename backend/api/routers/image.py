@@ -21,6 +21,7 @@ from lovart import (
     build_lovart_image_payload,
     extract_image_urls,
     lovart_image_model_options,
+    release_lovart_tasks,
 )
 from models import Asset, Flow, User
 from storage import object_key_for_asset, safe_storage_name, storage
@@ -275,6 +276,31 @@ def _asset_out(asset: Asset) -> ImageAssetOut:
     )
 
 
+def _saved_lovart_images(
+    db: Session,
+    user: User,
+    task_id: str,
+    *,
+    flow_id: Optional[str],
+    node_id: Optional[str],
+) -> list[ImageAssetOut]:
+    query = db.query(Asset).filter(
+        Asset.user_id == user.id,
+        Asset.kind == "generated_image",
+    )
+    if flow_id:
+        query = query.filter(Asset.flow_id == flow_id)
+    if node_id:
+        query = query.filter(Asset.node_id == node_id)
+    assets = []
+    for asset in query.order_by(Asset.created_at.asc()).all():
+        metadata = asset.asset_metadata if isinstance(asset.asset_metadata, dict) else {}
+        if str(metadata.get("taskId") or "") == task_id:
+            assets.append(_asset_out(asset))
+    expected_count = len(_image_batch_task_ids(task_id))
+    return assets if len(assets) >= expected_count else []
+
+
 @router.get("/models")
 def image_models():
     return {"models": lovart_image_model_options(), "default": DEFAULT_LOVART_IMAGE_MODEL}
@@ -341,8 +367,20 @@ async def get_image_generation_status(
     user: User = Depends(get_current_user),
 ):
     _ensure_flow_owner(db, flowId, user)
-    client = LovartClient()
     task_ids = _image_batch_task_ids(task_id)
+    saved_assets = _saved_lovart_images(db, user, task_id, flow_id=flowId, node_id=nodeId)
+    if saved_assets:
+        await release_lovart_tasks(LovartClient(), task_ids, reason="image_already_archived")
+        return ImageGenerationStatus(
+            id=task_id,
+            model=model,
+            status="completed",
+            imageUrls=[asset.url for asset in saved_assets],
+            assets=saved_assets,
+            raw={"source": "archived_assets"},
+        )
+
+    client = LovartClient()
     tasks: list[dict[str, Any]] = []
     errors: list[str] = []
     for child_task_id in task_ids:
@@ -366,11 +404,12 @@ async def get_image_generation_status(
     image_urls = [url for url in image_urls if not (url in seen_urls or seen_urls.add(url))]
     if errors and not tasks:
         raise _map_lovart_error(LovartAPIError(502, errors[0]))
-    if child_statuses and all(status == "completed" for status in child_statuses):
+    all_children_observed = len(child_statuses) == len(task_ids)
+    if all_children_observed and all(status == "completed" for status in child_statuses):
         status = "completed"
-    elif child_statuses and all(status == "failed" for status in child_statuses):
+    elif all_children_observed and all(status == "failed" for status in child_statuses):
         status = "failed"
-    elif child_statuses and not any(status == "running" for status in child_statuses):
+    elif all_children_observed and not any(status == "running" for status in child_statuses):
         status = "failed"
     elif errors and not child_statuses:
         status = "failed"
@@ -388,6 +427,11 @@ async def get_image_generation_status(
             model=model,
             image_urls=image_urls,
         )
+        await release_lovart_tasks(client, task_ids, reason="image_archived")
+    elif status == "failed" and len(child_statuses) == len(task_ids) and not any(
+        child_status == "running" for child_status in child_statuses
+    ):
+        await release_lovart_tasks(client, task_ids, reason="image_failed")
 
     return ImageGenerationStatus(
         id=task_id,
