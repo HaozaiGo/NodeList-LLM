@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from auth import get_current_user
+from billing import finalize_generation_charge, refund_generation_credits, reserve_generation_credits
 from database import get_db
 from lovart import (
     LovartAPIError,
@@ -57,6 +58,8 @@ class ImageGenerateResponse(BaseModel):
     model: str
     status: str
     projectId: Optional[str] = None
+    creditsCharged: int = 0
+    creditBalance: int = 0
 
 
 class ImageGenerationStatus(BaseModel):
@@ -316,10 +319,17 @@ async def generate_image(
     model = _select_image_model(payload.model)
     if payload.count not in {1, 2, 4}:
         raise HTTPException(status_code=400, detail="unsupported image count")
+    charge = reserve_generation_credits(
+        db,
+        user,
+        kind="image",
+        units=payload.count,
+        note=f"图片生成 {payload.count} 张 · {model}",
+    )
+    results = []
     try:
         reference_images = _resolve_reference_images(db, user, payload.reference_images)
         client = LovartClient()
-        results = []
         for index in range(max(1, payload.count)):
             prompt = payload.prompt
             if payload.count > 1:
@@ -335,12 +345,24 @@ async def generate_image(
             )
             results.append(await client.create_task(request))
     except ValueError as exc:
+        if results:
+            await release_lovart_tasks(LovartClient(), [result.task_id for result in results], reason="image_batch_submit_failed")
+        refund_generation_credits(db, user, charge, reason=str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LovartAPIError as exc:
+        if results:
+            await release_lovart_tasks(LovartClient(), [result.task_id for result in results], reason="image_batch_submit_failed")
+        refund_generation_credits(db, user, charge, reason=exc.detail)
         raise _map_lovart_error(exc) from exc
+    except Exception as exc:
+        if results:
+            await release_lovart_tasks(LovartClient(), [result.task_id for result in results], reason="image_batch_submit_failed")
+        refund_generation_credits(db, user, charge, reason=str(exc))
+        raise
 
     task_ids = [result.task_id for result in results]
     response_task_id = _image_batch_id(task_ids) if len(task_ids) > 1 else task_ids[0]
+    finalize_generation_charge(db, charge, response_task_id)
     _patch_flow_image_generation_task(
         db=db,
         user=user,
@@ -354,6 +376,8 @@ async def generate_image(
         model=model,
         status="running",
         projectId=results[0].request_id if results else None,
+        creditsCharged=charge.amount if charge else 0,
+        creditBalance=user.credit_balance,
     )
 
 

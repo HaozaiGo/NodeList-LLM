@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Any, Optional
 from database import get_db
-from models import Flow, User
+from models import Asset, Flow, User
 from auth import get_current_user
 
 router = APIRouter(prefix="/flows", tags=["flows"])
@@ -190,5 +190,12 @@ def delete_flow(
     user: User = Depends(get_current_user),
 ):
     flow = _own_flow(flow_id, user, db)
+    db.query(Asset).filter(
+        Asset.flow_id == flow.id,
+        Asset.user_id == user.id,
+    ).update(
+        {Asset.flow_id: None, Asset.node_id: None},
+        synchronize_session=False,
+    )
     db.delete(flow)
     db.commit()

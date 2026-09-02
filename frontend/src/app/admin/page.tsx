@@ -4,36 +4,54 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Activity,
+  ArrowUpRight,
   Ban,
+  ChevronLeft,
+  ChevronRight,
   Clock3,
   Coins,
+  Eye,
   FileText,
+  FolderOpen,
   Gauge,
   ImageIcon,
+  ImageUp,
   LayoutDashboard,
   Loader2,
   LogOut,
   RefreshCw,
+  Save,
   Search,
-  Shield,
   Sparkles,
+  Trash2,
   UserRound,
   Video,
   WalletCards,
+  X,
 } from "lucide-react";
 
 import {
   adjustUserCredits,
+  getBrandingConfig,
+  getAdminBillingConfig,
   getAdminSummary,
   listAdminModelRuns,
-  listAdminUsers,
+  listAdminUserFlows,
+  listAdminUsersPage,
   listCreditTransactions,
+  resolveMediaUrl,
+  updateAdminBranding,
+  updateAdminBillingConfig,
   updateAdminUser,
+  type AdminFlowSummary,
   type AdminSummary,
   type AdminModelRun,
   type AdminUser,
+  type BillingConfig,
+  type BrandingConfig,
   type CreditTransaction,
 } from "@/lib/api";
+import { BrandMark } from "@/components/branding/BrandMark";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/authStore";
 
@@ -76,6 +94,7 @@ const RUN_STATUS_LABELS: Record<string, string> = {
 };
 
 const RUN_KIND_LABELS = { text: "文本", image: "图片", video: "视频" } as const;
+const USERS_PER_PAGE = 30;
 
 function RunKindIcon({ kind }: { kind: AdminModelRun["kind"] }) {
   const Icon = kind === "video" ? Video : kind === "image" ? ImageIcon : FileText;
@@ -187,6 +206,289 @@ function CreditDialog({
   );
 }
 
+function UserProjectsDialog({
+  user,
+  flows,
+  loading,
+  error,
+  onClose,
+  onOpenFlow,
+}: {
+  user: AdminUser;
+  flows: AdminFlowSummary[];
+  loading: boolean;
+  error: string;
+  onClose: () => void;
+  onOpenFlow: (flow: AdminFlowSummary) => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 backdrop-blur-xl">
+      <div className="flex max-h-[78vh] w-full max-w-3xl flex-col overflow-hidden rounded-3xl border border-white/10 bg-[#111119] shadow-[0_30px_100px_rgba(0,0,0,0.65)]">
+        <div className="flex items-start justify-between border-b border-white/10 px-6 py-5">
+          <div className="min-w-0">
+            <p className="font-mono text-xs uppercase tracking-[0.24em] text-cyan-200">User Projects</p>
+            <h2 className="mt-2 text-2xl font-bold text-white">用户项目</h2>
+            <p className="mt-1 truncate text-sm text-zinc-400">{user.email}</p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex size-10 shrink-0 items-center justify-center rounded-full border border-white/10 bg-white/[0.06] text-zinc-300 transition hover:bg-white/10 hover:text-white"
+            title="关闭"
+          >
+            <X className="size-4" />
+          </button>
+        </div>
+
+        <div className="min-h-48 overflow-y-auto p-5">
+          {loading ? (
+            <div className="flex min-h-48 items-center justify-center text-zinc-500">
+              <Loader2 className="size-5 animate-spin" />
+            </div>
+          ) : error ? (
+            <div className="rounded-2xl border border-red-300/20 bg-red-500/10 p-4 text-sm text-red-200">{error}</div>
+          ) : flows.length === 0 ? (
+            <div className="flex min-h-48 flex-col items-center justify-center text-zinc-500">
+              <FolderOpen className="mb-3 size-7" />
+              <p className="text-sm">该用户还没有创建项目</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[620px] border-separate border-spacing-y-2 text-left text-sm">
+                <thead className="text-xs uppercase tracking-wide text-zinc-500">
+                  <tr>
+                    <th className="px-4 py-2">项目</th>
+                    <th className="px-4 py-2">画布内容</th>
+                    <th className="px-4 py-2">最后更新</th>
+                    <th className="px-4 py-2 text-right">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {flows.map((flow) => (
+                    <tr key={flow.id} className="bg-white/[0.045]">
+                      <td className="max-w-64 rounded-l-2xl px-4 py-4">
+                        <p className="truncate font-semibold text-white" title={flow.name}>{flow.name || "未命名项目"}</p>
+                        <p className="mt-1 font-mono text-[11px] text-zinc-600">{flow.id.slice(0, 8)}</p>
+                      </td>
+                      <td className="px-4 py-4 text-zinc-300">{flow.node_count} 节点 / {flow.edge_count} 连线</td>
+                      <td className="px-4 py-4 text-zinc-400">{formatDate(flow.updated_at || flow.created_at)}</td>
+                      <td className="rounded-r-2xl px-4 py-4 text-right">
+                        <button
+                          type="button"
+                          onClick={() => onOpenFlow(flow)}
+                          className="inline-flex items-center gap-2 rounded-full bg-cyan-500 px-3 py-2 text-xs font-bold text-[#061014] transition hover:bg-cyan-300"
+                        >
+                          进入画布
+                          <ArrowUpRight className="size-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BillingConfigPanel({
+  config,
+  imageCost,
+  videoCost,
+  saving,
+  error,
+  onImageCostChange,
+  onVideoCostChange,
+  onSave,
+}: {
+  config: BillingConfig | null;
+  imageCost: string;
+  videoCost: string;
+  saving: boolean;
+  error: string;
+  onImageCostChange: (value: string) => void;
+  onVideoCostChange: (value: string) => void;
+  onSave: () => void;
+}) {
+  const imageValue = Number(imageCost);
+  const videoValue = Number(videoCost);
+  const invalid =
+    !Number.isInteger(imageValue) ||
+    !Number.isInteger(videoValue) ||
+    imageValue < 0 ||
+    videoValue < 0;
+
+  return (
+    <div className="rounded-3xl border border-white/10 bg-[#111119]/86 p-5 shadow-2xl">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="font-mono text-xs uppercase tracking-[0.24em] text-amber-200">Billing Rules</p>
+          <h2 className="mt-2 text-xl font-bold text-white">积分计费配置</h2>
+        </div>
+        <Coins className="mt-1 size-5 text-amber-300" />
+      </div>
+
+      <div className="mt-5 space-y-4">
+        <label className="block">
+          <span className="mb-2 flex items-center gap-2 text-xs font-semibold text-zinc-400">
+            <ImageIcon className="size-3.5 text-cyan-300" />
+            每生成一张图片
+          </span>
+          <div className="relative">
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={imageCost}
+              onChange={(event) => onImageCostChange(event.target.value)}
+              className="h-11 w-full rounded-2xl border border-white/10 bg-white/[0.06] px-4 pr-14 text-sm font-bold text-white outline-none focus:border-amber-300/50"
+            />
+            <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs text-zinc-500">积分</span>
+          </div>
+        </label>
+
+        <label className="block">
+          <span className="mb-2 flex items-center gap-2 text-xs font-semibold text-zinc-400">
+            <Video className="size-3.5 text-violet-300" />
+            每生成一个视频
+          </span>
+          <div className="relative">
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={videoCost}
+              onChange={(event) => onVideoCostChange(event.target.value)}
+              className="h-11 w-full rounded-2xl border border-white/10 bg-white/[0.06] px-4 pr-14 text-sm font-bold text-white outline-none focus:border-amber-300/50"
+            />
+            <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs text-zinc-500">积分</span>
+          </div>
+        </label>
+      </div>
+
+      {error && <p className="mt-3 text-xs text-red-200">{error}</p>}
+      <div className="mt-4 flex items-center justify-between gap-3">
+        <p className="text-[11px] text-zinc-600">{config?.updated_at ? `${formatDate(config.updated_at)} 更新` : "尚未设置"}</p>
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={saving || invalid}
+          className="inline-flex h-10 items-center gap-2 rounded-full bg-amber-400 px-4 text-xs font-bold text-[#171006] transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-45"
+        >
+          {saving ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
+          保存计费
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function BrandingConfigPanel({
+  config,
+  name,
+  logoPreview,
+  saving,
+  error,
+  onNameChange,
+  onLogoChange,
+  onRemoveLogo,
+  onSave,
+}: {
+  config: BrandingConfig | null;
+  name: string;
+  logoPreview: string;
+  saving: boolean;
+  error: string;
+  onNameChange: (value: string) => void;
+  onLogoChange: (file: File) => void;
+  onRemoveLogo: () => void;
+  onSave: () => void;
+}) {
+  const normalizedName = name.trim();
+
+  return (
+    <div className="rounded-3xl border border-white/10 bg-[#111119]/86 p-5 shadow-2xl">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="font-mono text-xs uppercase tracking-[0.24em] text-fuchsia-200">Brand Identity</p>
+          <h2 className="mt-2 text-xl font-bold text-white">品牌设置</h2>
+        </div>
+        <Sparkles className="mt-1 size-5 text-fuchsia-300" />
+      </div>
+
+      <div className="mt-5 flex items-center gap-4">
+        <span className="flex size-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-white/10 bg-fuchsia-500 text-white">
+          {logoPreview ? (
+            <img src={logoPreview} alt={`${normalizedName || "品牌"} Logo 预览`} className="size-full object-contain" />
+          ) : (
+            <Sparkles className="size-7" />
+          )}
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-bold text-white">{normalizedName || "未命名品牌"}</p>
+          <p className="mt-1 text-xs text-zinc-500">PNG / JPG / WebP，最大 2MB</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-full border border-white/10 bg-white/[0.07] px-3 text-xs font-semibold text-zinc-200 transition hover:bg-white/12">
+              <ImageUp className="size-3.5" />
+              上传 Logo
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                className="sr-only"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) onLogoChange(file);
+                  event.target.value = "";
+                }}
+              />
+            </label>
+            {logoPreview && (
+              <button
+                type="button"
+                onClick={onRemoveLogo}
+                className="inline-flex size-9 items-center justify-center rounded-full border border-red-300/20 bg-red-500/10 text-red-200 transition hover:bg-red-500/20"
+                title="移除 Logo"
+              >
+                <Trash2 className="size-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <label className="mt-5 block">
+        <span className="mb-2 block text-xs font-semibold text-zinc-400">品牌名称</span>
+        <input
+          value={name}
+          maxLength={60}
+          onChange={(event) => onNameChange(event.target.value)}
+          className="h-11 w-full rounded-2xl border border-white/10 bg-white/[0.06] px-4 text-sm font-bold text-white outline-none focus:border-fuchsia-300/50"
+          placeholder="NodeList AI"
+        />
+      </label>
+
+      {error && <p className="mt-3 text-xs text-red-200">{error}</p>}
+      <div className="mt-4 flex items-center justify-between gap-3">
+        <p className="text-[11px] text-zinc-600">
+          {config?.updated_at ? `${formatDate(config.updated_at)} 更新` : "使用默认品牌"}
+        </p>
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={saving || !normalizedName}
+          className="inline-flex h-10 items-center gap-2 rounded-full bg-fuchsia-500 px-4 text-xs font-bold text-white transition hover:bg-fuchsia-400 disabled:cursor-not-allowed disabled:opacity-45"
+        >
+          {saving ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
+          保存品牌
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function AdminPage() {
   const router = useRouter();
   const { hydrate, hydrated, token, email, logout } = useAuthStore();
@@ -194,10 +496,30 @@ export default function AdminPage() {
   const [modelRuns, setModelRuns] = useState<AdminModelRun[]>([]);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [transactions, setTransactions] = useState<CreditTransaction[]>([]);
+  const [searchDraft, setSearchDraft] = useState("");
   const [query, setQuery] = useState("");
+  const [userPage, setUserPage] = useState(1);
+  const [userTotal, setUserTotal] = useState(0);
+  const [userTotalPages, setUserTotalPages] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [creditUser, setCreditUser] = useState<AdminUser | null>(null);
+  const [projectsUser, setProjectsUser] = useState<AdminUser | null>(null);
+  const [userFlows, setUserFlows] = useState<AdminFlowSummary[]>([]);
+  const [userFlowsLoading, setUserFlowsLoading] = useState(false);
+  const [userFlowsError, setUserFlowsError] = useState("");
+  const [billingConfig, setBillingConfig] = useState<BillingConfig | null>(null);
+  const [imageCost, setImageCost] = useState("0");
+  const [videoCost, setVideoCost] = useState("0");
+  const [billingSaving, setBillingSaving] = useState(false);
+  const [billingError, setBillingError] = useState("");
+  const [brandingConfig, setBrandingConfig] = useState<BrandingConfig | null>(null);
+  const [brandName, setBrandName] = useState("");
+  const [brandLogoFile, setBrandLogoFile] = useState<File | null>(null);
+  const [brandLogoPreview, setBrandLogoPreview] = useState("");
+  const [removeBrandLogo, setRemoveBrandLogo] = useState(false);
+  const [brandingSaving, setBrandingSaving] = useState(false);
+  const [brandingError, setBrandingError] = useState("");
 
   useEffect(() => {
     hydrate();
@@ -208,22 +530,29 @@ export default function AdminPage() {
     setLoading(true);
     setError("");
     try {
-      const [nextSummary, nextModelRuns, nextUsers, nextTransactions] = await Promise.all([
+      const [nextSummary, nextBillingConfig, nextModelRuns, nextUsersPage, nextTransactions] = await Promise.all([
         getAdminSummary(),
+        getAdminBillingConfig(),
         listAdminModelRuns(),
-        listAdminUsers({ q: query, limit: 100 }),
+        listAdminUsersPage({ q: query, page: userPage, pageSize: USERS_PER_PAGE }),
         listCreditTransactions({ limit: 100 }),
       ]);
       setSummary(nextSummary);
+      setBillingConfig(nextBillingConfig);
+      setImageCost(String(nextBillingConfig.image_cost));
+      setVideoCost(String(nextBillingConfig.video_cost));
       setModelRuns(nextModelRuns);
-      setUsers(nextUsers);
+      setUsers(nextUsersPage.items);
+      setUserTotal(nextUsersPage.total);
+      setUserTotalPages(nextUsersPage.total_pages);
+      if (nextUsersPage.page !== userPage) setUserPage(nextUsersPage.page);
       setTransactions(nextTransactions);
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setLoading(false);
     }
-  }, [query, token]);
+  }, [query, token, userPage]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -242,6 +571,30 @@ export default function AdminPage() {
     }, 10_000);
     return () => window.clearInterval(timer);
   }, [hydrated, token]);
+
+  useEffect(() => {
+    if (!hydrated || !token) return;
+    let cancelled = false;
+    void getBrandingConfig()
+      .then((nextConfig) => {
+        if (cancelled) return;
+        setBrandingConfig(nextConfig);
+        setBrandName(nextConfig.name);
+        setBrandLogoPreview(resolveMediaUrl(nextConfig.logo_url));
+      })
+      .catch((err) => {
+        if (!cancelled) setBrandingError(err instanceof Error ? err.message : "品牌配置加载失败");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [hydrated, token]);
+
+  useEffect(() => {
+    return () => {
+      if (brandLogoPreview.startsWith("blob:")) URL.revokeObjectURL(brandLogoPreview);
+    };
+  }, [brandLogoPreview]);
 
   const selectedUserTransactions = useMemo(() => {
     if (!creditUser) return transactions;
@@ -272,6 +625,103 @@ export default function AdminPage() {
     void getAdminSummary().then(setSummary).catch(() => {});
   };
 
+  const openUserProjects = async (user: AdminUser) => {
+    setProjectsUser(user);
+    setUserFlows([]);
+    setUserFlowsError("");
+    setUserFlowsLoading(true);
+    try {
+      setUserFlows(await listAdminUserFlows(user.id));
+    } catch (err) {
+      setUserFlowsError(err instanceof Error ? err.message : "用户项目列表加载失败");
+    } finally {
+      setUserFlowsLoading(false);
+    }
+  };
+
+  const openManagedFlow = (flow: AdminFlowSummary) => {
+    if (!projectsUser) return;
+    const params = new URLSearchParams({
+      studio: "1",
+      flow: flow.id,
+      admin_user: projectsUser.id,
+      admin_email: projectsUser.email,
+    });
+    router.push(`/?${params.toString()}`);
+  };
+
+  const saveBillingConfig = async () => {
+    const nextImageCost = Number(imageCost);
+    const nextVideoCost = Number(videoCost);
+    if (!Number.isInteger(nextImageCost) || !Number.isInteger(nextVideoCost) || nextImageCost < 0 || nextVideoCost < 0) {
+      setBillingError("计费积分必须是大于或等于 0 的整数");
+      return;
+    }
+    setBillingSaving(true);
+    setBillingError("");
+    try {
+      const nextConfig = await updateAdminBillingConfig({
+        image_cost: nextImageCost,
+        video_cost: nextVideoCost,
+      });
+      setBillingConfig(nextConfig);
+      setImageCost(String(nextConfig.image_cost));
+      setVideoCost(String(nextConfig.video_cost));
+    } catch (err) {
+      setBillingError(err instanceof Error ? err.message : "计费配置保存失败");
+    } finally {
+      setBillingSaving(false);
+    }
+  };
+
+  const selectBrandLogo = (file: File) => {
+    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+      setBrandingError("Logo 仅支持 PNG、JPG 或 WebP");
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      setBrandingError("Logo 文件不能超过 2MB");
+      return;
+    }
+    setBrandingError("");
+    setBrandLogoFile(file);
+    setRemoveBrandLogo(false);
+    setBrandLogoPreview(URL.createObjectURL(file));
+  };
+
+  const clearBrandLogo = () => {
+    setBrandLogoFile(null);
+    setRemoveBrandLogo(true);
+    setBrandLogoPreview("");
+    setBrandingError("");
+  };
+
+  const saveBrandingConfig = async () => {
+    const normalizedName = brandName.trim();
+    if (!normalizedName) {
+      setBrandingError("品牌名称不能为空");
+      return;
+    }
+    setBrandingSaving(true);
+    setBrandingError("");
+    try {
+      const nextConfig = await updateAdminBranding({
+        name: normalizedName,
+        logo: brandLogoFile ?? undefined,
+        removeLogo: removeBrandLogo,
+      });
+      setBrandingConfig(nextConfig);
+      setBrandName(nextConfig.name);
+      setBrandLogoFile(null);
+      setRemoveBrandLogo(false);
+      setBrandLogoPreview(resolveMediaUrl(nextConfig.logo_url));
+    } catch (err) {
+      setBrandingError(err instanceof Error ? err.message : "品牌配置保存失败");
+    } finally {
+      setBrandingSaving(false);
+    }
+  };
+
   const handleLogout = () => {
     logout();
     router.push("/");
@@ -285,11 +735,11 @@ export default function AdminPage() {
       <header className="sticky top-0 z-30 border-b border-white/10 bg-[#07070b]/88 backdrop-blur-xl">
         <div className="mx-auto flex h-18 max-w-7xl items-center justify-between px-5 py-4">
           <div className="flex items-center gap-3">
-            <span className="flex size-10 items-center justify-center rounded-2xl bg-fuchsia-500 text-white">
-              <Shield className="size-5" />
-            </span>
+            <BrandMark showName={false} logoClassName="size-10 rounded-2xl" />
             <div>
-              <h1 className="text-lg font-bold text-white">后台管理端</h1>
+              <h1 className="text-lg font-bold text-white">
+                {brandName.trim() ? `${brandName.trim()} 管理后台` : "管理后台"}
+              </h1>
               <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-zinc-500">Admin Console</p>
             </div>
           </div>
@@ -428,13 +878,19 @@ export default function AdminPage() {
                 className="relative w-full sm:w-72"
                 onSubmit={(event) => {
                   event.preventDefault();
-                  refresh();
+                  const nextQuery = searchDraft.trim();
+                  if (nextQuery === query && userPage === 1) {
+                    refresh();
+                    return;
+                  }
+                  setUserPage(1);
+                  setQuery(nextQuery);
                 }}
               >
                 <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-zinc-500" />
                 <input
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
+                  value={searchDraft}
+                  onChange={(event) => setSearchDraft(event.target.value)}
                   placeholder="搜索邮箱"
                   className="h-11 w-full rounded-full border border-white/10 bg-white/[0.06] pl-10 pr-4 text-sm text-white outline-none focus:border-fuchsia-300/50"
                 />
@@ -500,6 +956,14 @@ export default function AdminPage() {
                           <div className="flex justify-end gap-2">
                             <button
                               type="button"
+                              onClick={() => void openUserProjects(user)}
+                              className="inline-flex items-center gap-1 rounded-full border border-cyan-300/25 bg-cyan-400/10 px-3 py-2 text-xs font-bold text-cyan-100 transition hover:bg-cyan-400/20"
+                            >
+                              <Eye className="size-3.5" />
+                              查看
+                            </button>
+                            <button
+                              type="button"
                               onClick={() => setCreditUser(user)}
                               className="rounded-full bg-fuchsia-500 px-3 py-2 text-xs font-bold text-white transition hover:bg-fuchsia-400"
                             >
@@ -521,10 +985,60 @@ export default function AdminPage() {
                 </tbody>
               </table>
             </div>
+
+            <div className="mt-4 flex flex-col gap-3 border-t border-white/8 pt-4 text-sm text-zinc-400 sm:flex-row sm:items-center sm:justify-between">
+              <p>每页 {USERS_PER_PAGE} 条 · 共 {userTotal} 位用户</p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setUserPage((page) => Math.max(1, page - 1))}
+                  disabled={loading || userPage <= 1}
+                  className="flex size-9 items-center justify-center rounded-full border border-white/10 bg-white/[0.06] text-zinc-300 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-35"
+                  title="上一页"
+                >
+                  <ChevronLeft className="size-4" />
+                </button>
+                <span className="min-w-24 text-center font-mono text-xs text-zinc-300">
+                  {userPage} / {userTotalPages}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setUserPage((page) => Math.min(userTotalPages, page + 1))}
+                  disabled={loading || userPage >= userTotalPages}
+                  className="flex size-9 items-center justify-center rounded-full border border-white/10 bg-white/[0.06] text-zinc-300 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-35"
+                  title="下一页"
+                >
+                  <ChevronRight className="size-4" />
+                </button>
+              </div>
+            </div>
           </div>
         </section>
 
         <aside className="space-y-6">
+          <BrandingConfigPanel
+            config={brandingConfig}
+            name={brandName}
+            logoPreview={brandLogoPreview}
+            saving={brandingSaving}
+            error={brandingError}
+            onNameChange={setBrandName}
+            onLogoChange={selectBrandLogo}
+            onRemoveLogo={clearBrandLogo}
+            onSave={() => void saveBrandingConfig()}
+          />
+
+          <BillingConfigPanel
+            config={billingConfig}
+            imageCost={imageCost}
+            videoCost={videoCost}
+            saving={billingSaving}
+            error={billingError}
+            onImageCostChange={setImageCost}
+            onVideoCostChange={setVideoCost}
+            onSave={() => void saveBillingConfig()}
+          />
+
           <div className="rounded-3xl border border-white/10 bg-[#111119]/86 p-5 shadow-2xl">
             <div className="flex items-center gap-3">
               <span className="flex size-10 items-center justify-center rounded-2xl bg-cyan-400/10 text-cyan-200">
@@ -578,6 +1092,16 @@ export default function AdminPage() {
 
       {creditUser && (
         <CreditDialog user={creditUser} onClose={() => setCreditUser(null)} onSubmit={handleCreditSubmit} />
+      )}
+      {projectsUser && (
+        <UserProjectsDialog
+          user={projectsUser}
+          flows={userFlows}
+          loading={userFlowsLoading}
+          error={userFlowsError}
+          onClose={() => setProjectsUser(null)}
+          onOpenFlow={openManagedFlow}
+        />
       )}
     </main>
   );

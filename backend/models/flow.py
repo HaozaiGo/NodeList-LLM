@@ -59,6 +59,28 @@ class Asset(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
+class BillingConfig(Base):
+    __tablename__ = "billing_config"
+
+    id = Column(String, primary_key=True, default="default")
+    image_cost = Column(Integer, nullable=False, default=0, server_default="0")
+    video_cost = Column(Integer, nullable=False, default=0, server_default="0")
+    updated_by = Column(String, ForeignKey("users.id"), nullable=True)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class BrandingConfig(Base):
+    __tablename__ = "branding_config"
+
+    id = Column(String, primary_key=True, default="default")
+    name = Column(String, nullable=False, default="NodeList AI", server_default="NodeList AI")
+    logo_storage_key = Column(String, nullable=True)
+    logo_url = Column(String, nullable=True)
+    logo_mime_type = Column(String, nullable=True)
+    updated_by = Column(String, ForeignKey("users.id"), nullable=True)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class CreditTransaction(Base):
     __tablename__ = "credit_transactions"
 

@@ -73,6 +73,11 @@ class LocalStorage:
             shutil.copyfile(local_path, target)
         return StoredObject(storage_key=storage_key.strip("/"), public_url=self.public_url(storage_key), size=target.stat().st_size)
 
+    def delete(self, storage_key: str) -> None:
+        path = self.local_path(storage_key)
+        if path.exists():
+            path.unlink()
+
     def ensure_local(self, storage_key: str) -> Path:
         path = self.local_path(storage_key)
         if not path.exists():
@@ -120,6 +125,11 @@ class TosStorage(LocalStorage):
             public_url=self.public_url(normalized_key),
             size=local_path.stat().st_size,
         )
+
+    def delete(self, storage_key: str) -> None:
+        normalized_key = storage_key.strip("/")
+        self.client.delete_object(self.bucket, normalized_key)
+        super().delete(normalized_key)
 
     def ensure_local(self, storage_key: str) -> Path:
         path = self.local_path(storage_key)

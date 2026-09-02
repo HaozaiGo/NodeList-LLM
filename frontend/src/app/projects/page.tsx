@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, CalendarDays, FolderPlus, ImageIcon, LogOut, MoreHorizontal, Pencil, Plus, Sparkles, Trash2, X } from "lucide-react";
+import { ArrowLeft, CalendarDays, FolderPlus, ImageIcon, LogOut, MoreHorizontal, Pencil, Plus, Trash2, X } from "lucide-react";
+import { BrandMark } from "@/components/branding/BrandMark";
 import { createFlow, deleteFlow, isAuthExpiredError, listFlows, resolveMediaUrl, saveFlow, type FlowRecord } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/authStore";
@@ -250,9 +251,7 @@ export default function ProjectsPage() {
         <div className="flex flex-wrap items-end justify-between gap-5">
           <div>
             <div className="flex items-center gap-3">
-              <div className="grid size-10 place-items-center rounded-xl bg-fuchsia-500 text-white shadow-[0_12px_34px_rgba(217,35,238,0.28)]">
-                <Sparkles className="size-5" />
-              </div>
+              <BrandMark showName={false} logoClassName="size-10" />
               <div>
                 <p className="font-mono text-xs uppercase tracking-[0.32em] text-fuchsia-200">Project Workspace</p>
                 <h1 className="mt-1 text-3xl font-bold tracking-normal text-white">全部项目</h1>

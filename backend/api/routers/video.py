@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from auth import get_current_user
+from billing import finalize_generation_charge, refund_generation_credits, reserve_generation_credits
 from database import get_db
 from lovart import LovartAPIError, LovartClient, release_lovart_tasks
 from models import Asset, User
@@ -2135,11 +2136,10 @@ async def list_video_generation_models(_: User = Depends(get_current_user)):
     return {"models": _video_model_options(), "default": _default_generation_model()}
 
 
-@router.post("/generate")
-async def generate_video(
+async def _generate_video_without_billing(
     payload: VideoGenerateRequest,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    db: Session,
+    user: User,
 ):
     _validate_generation_request(payload)
     model = _select_generation_model(payload)
@@ -2212,6 +2212,36 @@ async def generate_video(
             "camerafixed": payload.camerafixed,
             "reference_image_count": reference_count,
         },
+    }
+
+
+@router.post("/generate")
+async def generate_video(
+    payload: VideoGenerateRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    _validate_generation_request(payload)
+    model = _select_generation_model(payload)
+    charge = reserve_generation_credits(
+        db,
+        user,
+        kind="video",
+        note=f"视频生成 1 个 · {model} · {payload.seconds}s",
+    )
+    try:
+        result = await _generate_video_without_billing(payload, db, user)
+    except Exception as exc:
+        reason = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        refund_generation_credits(db, user, charge, reason=str(reason))
+        raise
+
+    task_id = str(result.get("id") or "")
+    finalize_generation_charge(db, charge, task_id)
+    return {
+        **result,
+        "creditsCharged": charge.amount if charge else 0,
+        "creditBalance": user.credit_balance,
     }
 
 

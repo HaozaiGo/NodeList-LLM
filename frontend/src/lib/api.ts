@@ -20,7 +20,14 @@ export function isAuthExpiredError(error: unknown) {
 function authHeaders(): Record<string, string> {
   if (typeof window === "undefined") return {};
   const token = localStorage.getItem("nodelist_token");
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  if (!token) return {};
+
+  const params = new URLSearchParams(window.location.search);
+  const adminActAsUser = params.get("studio") === "1" ? params.get("admin_user")?.trim() : "";
+  return {
+    Authorization: `Bearer ${token}`,
+    ...(adminActAsUser ? { "X-Admin-Act-As-User": adminActAsUser } : {}),
+  };
 }
 
 async function refreshAuthToken(): Promise<boolean> {
@@ -141,6 +148,8 @@ export interface VideoGenerateResponse {
   model: string;
   status: string;
   request?: Record<string, unknown>;
+  creditsCharged?: number;
+  creditBalance?: number;
 }
 
 export interface VideoGenerationStatus {
@@ -238,6 +247,8 @@ export interface ImageGenerateResponse {
   model: string;
   status: string;
   projectId?: string | null;
+  creditsCharged?: number;
+  creditBalance?: number;
 }
 
 export interface GeneratedImageAsset {
@@ -313,6 +324,22 @@ export interface AdminSummary {
   assets: number;
 }
 
+export interface BillingConfig {
+  image_cost: number;
+  video_cost: number;
+  updated_at: string | null;
+}
+
+export interface BillingStatus extends BillingConfig {
+  credit_balance: number;
+}
+
+export interface BrandingConfig {
+  name: string;
+  logo_url: string;
+  updated_at: string | null;
+}
+
 export interface AdminUser {
   id: string;
   email: string;
@@ -322,6 +349,23 @@ export interface AdminUser {
   created_at: string | null;
   flows: number;
   assets: number;
+}
+
+export interface AdminUserPage {
+  items: AdminUser[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
+export interface AdminFlowSummary {
+  id: string;
+  name: string;
+  node_count: number;
+  edge_count: number;
+  created_at: string | null;
+  updated_at: string | null;
 }
 
 export interface AdminModelRun {
@@ -532,7 +576,9 @@ export async function generateVideo(payload: VideoGeneratePayload): Promise<Vide
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(requestPayload),
   });
-  return readJsonOrThrow<VideoGenerateResponse>(r, "视频生成任务创建失败");
+  const result = await readJsonOrThrow<VideoGenerateResponse>(r, "视频生成任务创建失败");
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("nodelist:billing-updated"));
+  return result;
 }
 
 export async function getVideoGenerationStatus(videoId: string): Promise<VideoGenerationStatus> {
@@ -569,7 +615,9 @@ export async function generateImage(payload: ImageGeneratePayload): Promise<Imag
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(requestPayload),
   });
-  return readJsonOrThrow<ImageGenerateResponse>(r, "图片生成任务创建失败");
+  const result = await readJsonOrThrow<ImageGenerateResponse>(r, "图片生成任务创建失败");
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("nodelist:billing-updated"));
+  return result;
 }
 
 export async function getImageGenerationStatus(
@@ -602,6 +650,51 @@ export async function getAdminSummary(): Promise<AdminSummary> {
   return readJsonOrThrow<AdminSummary>(r, "后台概览获取失败");
 }
 
+export async function getBrandingConfig(): Promise<BrandingConfig> {
+  const r = await fetch(`${BASE}/api/branding`, { cache: "no-store" });
+  return readJsonOrThrow<BrandingConfig>(r, "品牌配置获取失败");
+}
+
+export async function updateAdminBranding(payload: {
+  name: string;
+  logo?: File | null;
+  removeLogo?: boolean;
+}): Promise<BrandingConfig> {
+  const body = new FormData();
+  body.append("name", payload.name);
+  body.append("remove_logo", String(Boolean(payload.removeLogo)));
+  if (payload.logo) body.append("logo", payload.logo);
+  const r = await fetchWithAuthRetry(`${BASE}/api/admin/branding`, {
+    method: "PUT",
+    body,
+  });
+  const result = await readJsonOrThrow<BrandingConfig>(r, "品牌配置保存失败");
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("nodelist:branding-updated"));
+  return result;
+}
+
+export async function getBillingStatus(): Promise<BillingStatus> {
+  const r = await fetchWithAuthRetry(`${BASE}/api/billing/status`);
+  return readJsonOrThrow<BillingStatus>(r, "积分计费状态获取失败");
+}
+
+export async function getAdminBillingConfig(): Promise<BillingConfig> {
+  const r = await fetchWithAuthRetry(`${BASE}/api/admin/billing-config`);
+  return readJsonOrThrow<BillingConfig>(r, "积分计费配置获取失败");
+}
+
+export async function updateAdminBillingConfig(payload: {
+  image_cost: number;
+  video_cost: number;
+}): Promise<BillingConfig> {
+  const r = await fetchWithAuthRetry(`${BASE}/api/admin/billing-config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return readJsonOrThrow<BillingConfig>(r, "积分计费配置保存失败");
+}
+
 export async function listAdminUsers(params: { q?: string; limit?: number; offset?: number } = {}): Promise<AdminUser[]> {
   const query = new URLSearchParams();
   if (params.q) query.set("q", params.q);
@@ -610,6 +703,22 @@ export async function listAdminUsers(params: { q?: string; limit?: number; offse
   const suffix = query.toString() ? `?${query.toString()}` : "";
   const r = await fetchWithAuthRetry(`${BASE}/api/admin/users${suffix}`);
   return readJsonOrThrow<AdminUser[]>(r, "后台用户列表获取失败");
+}
+
+export async function listAdminUsersPage(
+  params: { q?: string; page?: number; pageSize?: number } = {}
+): Promise<AdminUserPage> {
+  const query = new URLSearchParams();
+  if (params.q) query.set("q", params.q);
+  query.set("page", String(params.page ?? 1));
+  query.set("page_size", String(params.pageSize ?? 30));
+  const r = await fetchWithAuthRetry(`${BASE}/api/admin/users-page?${query.toString()}`);
+  return readJsonOrThrow<AdminUserPage>(r, "后台用户分页获取失败");
+}
+
+export async function listAdminUserFlows(userId: string): Promise<AdminFlowSummary[]> {
+  const r = await fetchWithAuthRetry(`${BASE}/api/admin/users/${encodeURIComponent(userId)}/flows`);
+  return readJsonOrThrow<AdminFlowSummary[]>(r, "用户项目列表获取失败");
 }
 
 export async function listAdminModelRuns(params: { includeStale?: boolean } = {}): Promise<AdminModelRun[]> {

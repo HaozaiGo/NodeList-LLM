@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
-from models import Base
+from models import Base, BillingConfig, BrandingConfig
 
 load_dotenv()
 
@@ -15,6 +15,28 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 def init_db():
     Base.metadata.create_all(bind=engine)
     migrate_schema()
+    ensure_billing_config()
+    ensure_branding_config()
+
+
+def ensure_billing_config():
+    db = SessionLocal()
+    try:
+        if not db.get(BillingConfig, "default"):
+            db.add(BillingConfig(id="default", image_cost=0, video_cost=0))
+            db.commit()
+    finally:
+        db.close()
+
+
+def ensure_branding_config():
+    db = SessionLocal()
+    try:
+        if not db.get(BrandingConfig, "default"):
+            db.add(BrandingConfig(id="default", name="NodeList AI"))
+            db.commit()
+    finally:
+        db.close()
 
 
 def migrate_schema():

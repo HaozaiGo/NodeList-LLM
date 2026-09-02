@@ -27,6 +27,7 @@ import {
   Rocket,
   Save,
   Search,
+  ShieldCheck,
   SlidersHorizontal,
   Sparkles,
   Type,
@@ -36,12 +37,14 @@ import {
 } from "lucide-react";
 import { FlowCanvas } from "@/components/canvas/FlowCanvas";
 import { FlowProvider } from "@/components/canvas/FlowProvider";
+import { BrandMark } from "@/components/branding/BrandMark";
 import { HomeLanding } from "@/components/landing/HomeLanding";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
   ApiError,
   createVideoGenerationSpec,
+  getBillingStatus,
   isAuthExpiredError,
   listAssets,
   listImageModels,
@@ -534,17 +537,43 @@ function TopBar() {
   const router = useRouter();
   const { email } = useAuthStore();
   const { flowName, setFlowName, saving, saveError, persistFlow } = useFlowStore();
+  const [billingStatus, setBillingStatus] = useState<{ credit_balance: number; image_cost: number; video_cost: number } | null>(null);
+  const managedUser = useMemo(() => {
+    if (typeof window === "undefined") return null;
+    const params = new URLSearchParams(window.location.search);
+    const userId = params.get("admin_user")?.trim();
+    if (!userId) return null;
+    return {
+      id: userId,
+      email: params.get("admin_email")?.trim() || userId.slice(0, 8),
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refreshBilling = () => {
+      void getBillingStatus()
+        .then((status) => {
+          if (!cancelled) setBillingStatus(status);
+        })
+        .catch(() => {});
+    };
+    refreshBilling();
+    window.addEventListener("nodelist:billing-updated", refreshBilling);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("nodelist:billing-updated", refreshBilling);
+    };
+  }, []);
 
   const handleBackToProjects = () => {
-    router.push("/projects");
+    router.push(managedUser ? "/admin" : "/projects");
   };
 
   return (
     <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-start justify-between p-5">
       <div className="pointer-events-auto flex h-[54px] min-w-[390px] items-center gap-4 rounded-2xl border border-white/10 bg-[#121217]/90 px-5 shadow-2xl backdrop-blur">
-        <div className="flex size-9 items-center justify-center rounded-xl bg-fuchsia-500/15 text-sm font-black text-fuchsia-300 ring-1 ring-fuchsia-300/25">
-          N
-        </div>
+        <BrandMark showName={false} logoClassName="size-9 bg-fuchsia-500/15 ring-1 ring-fuchsia-300/25 shadow-none" />
         <div className="h-6 w-px bg-white/10" />
         <input
           className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-zinc-100 outline-none"
@@ -565,10 +594,16 @@ function TopBar() {
       </div>
 
       <div className="pointer-events-auto flex items-center gap-2">
-        <Pill>{email ?? "local user"}</Pill>
-        <Pill>
+        {managedUser && (
+          <Pill active>
+            <ShieldCheck className="size-3.5" />
+            代管 {managedUser.email}
+          </Pill>
+        )}
+        <Pill>{managedUser ? `管理员 ${email ?? ""}` : email ?? "local user"}</Pill>
+        <Pill className="tabular-nums" >
           <Zap className="size-3.5 text-amber-300" />
-          60
+          {billingStatus?.credit_balance ?? "-"}
         </Pill>
         <Button
           className="h-9 rounded-full border border-white/10 bg-white/[0.06] px-4 text-xs text-zinc-100 hover:bg-white/10"
@@ -584,7 +619,7 @@ function TopBar() {
         <Button
           className="size-9 rounded-full border border-white/10 bg-white/[0.06] p-0 text-zinc-300 hover:bg-white/10"
           onClick={handleBackToProjects}
-          title="返回项目选择"
+          title={managedUser ? "返回管理后台" : "返回项目选择"}
         >
           <LogOut className="size-4" />
         </Button>
@@ -2951,6 +2986,7 @@ export default function Home() {
     async () => {
       const params = new URLSearchParams(window.location.search);
       const requestedFlowId = params.get("flow");
+      const fallbackPath = params.get("admin_user") ? "/admin" : "/projects";
       if (requestedFlowId) {
         setStudioBooting(true);
         setStudioError("");
@@ -2963,7 +2999,7 @@ export default function Home() {
             return;
           }
           if (error instanceof ApiError && error.status === 404) {
-            router.replace("/projects");
+            router.replace(fallbackPath);
             return;
           }
           setStudioError(error instanceof Error ? error.message : "项目加载失败");
@@ -2971,7 +3007,7 @@ export default function Home() {
           setStudioBooting(false);
         }
       } else {
-        router.replace("/projects");
+        router.replace(fallbackPath);
         return;
       }
     },
@@ -3021,7 +3057,9 @@ export default function Home() {
     return (
       <main className="flex min-h-screen flex-col items-center justify-center gap-4 bg-[#030306] text-zinc-200">
         <p className="text-sm text-zinc-400">{studioError}</p>
-        <Button onClick={() => router.replace("/projects")}>返回项目空间</Button>
+        <Button onClick={() => router.replace(new URLSearchParams(window.location.search).get("admin_user") ? "/admin" : "/projects")}>
+          返回{new URLSearchParams(window.location.search).get("admin_user") ? "管理后台" : "项目空间"}
+        </Button>
       </main>
     );
   }

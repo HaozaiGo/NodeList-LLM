@@ -23,6 +23,7 @@ import {
   Zap,
 } from "lucide-react";
 
+import { BrandMark } from "@/components/branding/BrandMark";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/authStore";
 
@@ -502,10 +503,7 @@ export function HomeLanding({
         >
           <nav className="mx-auto flex h-full w-full max-w-7xl items-center justify-between">
             <Link href="/" className="flex items-center gap-3">
-              <span className="flex size-9 items-center justify-center rounded-xl bg-fuchsia-500 text-white shadow-[0_10px_28px_rgba(236,34,208,0.35)]">
-                <Sparkles className="size-5" />
-              </span>
-              <span className="text-lg font-bold text-white">NodeList AI</span>
+              <BrandMark />
             </Link>
             <div className="hidden items-center gap-8 text-sm font-medium text-zinc-400 md:flex">
               {navItems.map((item) => (

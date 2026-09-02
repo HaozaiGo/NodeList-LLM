@@ -8,6 +8,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from auth import get_current_admin
+from billing import get_billing_config
 from database import get_db
 from models import Asset, CreditTransaction, Flow, User
 
@@ -23,6 +24,23 @@ class AdminUserOut(BaseModel):
     created_at: Optional[datetime] = None
     flows: int
     assets: int
+
+
+class AdminUserPageOut(BaseModel):
+    items: list[AdminUserOut]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
+
+class AdminFlowSummaryOut(BaseModel):
+    id: str
+    name: str
+    node_count: int
+    edge_count: int
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
 
 class AdminSummaryOut(BaseModel):
@@ -61,6 +79,17 @@ class CreditTransactionOut(BaseModel):
 class CreditAdjustResponse(BaseModel):
     user: AdminUserOut
     transaction: CreditTransactionOut
+
+
+class BillingConfigOut(BaseModel):
+    image_cost: int
+    video_cost: int
+    updated_at: Optional[datetime] = None
+
+
+class BillingConfigUpdate(BaseModel):
+    image_cost: int = Field(..., ge=0, le=1_000_000)
+    video_cost: int = Field(..., ge=0, le=1_000_000)
 
 
 class AdminModelRunOut(BaseModel):
@@ -252,6 +281,38 @@ def summary(
     )
 
 
+@router.get("/billing-config", response_model=BillingConfigOut)
+def get_admin_billing_config(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_admin),
+):
+    config = get_billing_config(db)
+    return BillingConfigOut(
+        image_cost=config.image_cost,
+        video_cost=config.video_cost,
+        updated_at=config.updated_at,
+    )
+
+
+@router.put("/billing-config", response_model=BillingConfigOut)
+def update_admin_billing_config(
+    body: BillingConfigUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    config = get_billing_config(db)
+    config.image_cost = body.image_cost
+    config.video_cost = body.video_cost
+    config.updated_by = admin.id
+    db.commit()
+    db.refresh(config)
+    return BillingConfigOut(
+        image_cost=config.image_cost,
+        video_cost=config.video_cost,
+        updated_at=config.updated_at,
+    )
+
+
 @router.get("/users", response_model=list[AdminUserOut])
 def list_users(
     q: str = "",
@@ -265,6 +326,64 @@ def list_users(
         query = query.filter(User.email.ilike(f"%{q.strip()}%"))
     users = query.offset(offset).limit(limit).all()
     return [_user_out(db, user) for user in users]
+
+
+@router.get("/users-page", response_model=AdminUserPageOut)
+def list_users_page(
+    q: str = "",
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=30, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_admin),
+):
+    query = db.query(User)
+    if q.strip():
+        query = query.filter(User.email.ilike(f"%{q.strip()}%"))
+    total = query.count()
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    current_page = min(page, total_pages)
+    users = (
+        query.order_by(User.created_at.desc())
+        .offset((current_page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return AdminUserPageOut(
+        items=[_user_out(db, user) for user in users],
+        total=total,
+        page=current_page,
+        page_size=page_size,
+        total_pages=total_pages,
+    )
+
+
+@router.get("/users/{user_id}/flows", response_model=list[AdminFlowSummaryOut])
+def list_user_flows(
+    user_id: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_admin),
+):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    flows = (
+        db.query(Flow)
+        .filter(Flow.user_id == user.id)
+        .order_by(Flow.updated_at.desc(), Flow.created_at.desc())
+        .all()
+    )
+    return [
+        AdminFlowSummaryOut(
+            id=flow.id,
+            name=flow.name,
+            node_count=len(flow.nodes or []),
+            edge_count=len(flow.edges or []),
+            created_at=flow.created_at,
+            updated_at=flow.updated_at,
+        )
+        for flow in flows
+    ]
 
 
 @router.get("/model-runs", response_model=list[AdminModelRunOut])
