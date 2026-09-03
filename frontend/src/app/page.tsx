@@ -71,6 +71,7 @@ import {
   videoModelMeta,
   videoModes,
   videoRatiosForModel,
+  videoReferenceImagesForModel,
   videoResolutionsForModel,
   videoSecondsForModel,
   type VideoGenerationParams,
@@ -1475,11 +1476,11 @@ function Composer({
   const visibleReferences = references.slice(0, 4);
   const imageReferenceCount = references.filter((item) => item.kind === "image").length;
   const referenceBadgeCount = references.length;
-  const vertexTextToVideo = isVertexVeoModel(selectedVideoModel);
+  const vertexVeo = isVertexVeoModel(selectedVideoModel);
   const videoReferenceHint =
     isVideoGenerationNode && imageReferenceCount > 0
-      ? vertexTextToVideo
-        ? "Vertex Veo 当前使用文生视频：参考图会转为提示上下文，不直接上传图片"
+      ? vertexVeo
+        ? "Vertex Veo 使用第一张上游图片作为视频首帧，其余图片不会直接发送"
         : `当前模型支持多图参考，将引用${imageReferenceCount}张图片`
       : "";
   const selectedModelLabel = isVideoGenerationNode
@@ -1497,7 +1498,7 @@ function Composer({
   const allowedVideoResolutions = videoResolutionsForModel(selectedVideoModel);
   const allowedVideoSeconds = videoSecondsForModel(selectedVideoModel);
   const allowedVideoModes = isVertexVeoModel(selectedVideoModel)
-    ? [{ value: "reference" as const, label: "文生视频" }]
+    ? [{ value: "reference" as const, label: "图文生视频" }]
     : videoModes;
   const allowedImageRatios = imageRatiosForModel(selectedImageModel);
   const SelectedSettingIcon = selectedSetting?.icon;
@@ -1656,12 +1657,7 @@ function Composer({
                 <div className="flex flex-wrap items-center gap-2">
                   {videoReferenceHint && (
                     <span
-                      className={cn(
-                        "rounded-full border px-2.5 py-1 text-[11px] font-semibold",
-                        vertexTextToVideo
-                          ? "border-amber-300/25 bg-amber-400/10 text-amber-100"
-                          : "border-cyan-300/25 bg-cyan-400/10 text-cyan-100"
-                      )}
+                      className="rounded-full border border-cyan-300/25 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-semibold text-cyan-100"
                     >
                       {videoReferenceHint}
                     </span>
@@ -2798,7 +2794,10 @@ function StudioShell() {
           }))
       : [];
     const subjectUrlByAssetId = new Map(subjectAssets.map((item) => [item.sourceAssetId, item.url]));
-    const references = imageReferences.map((item) => subjectUrlByAssetId.get(item.assetId || "") || item.url);
+    const references = videoReferenceImagesForModel(
+      selectedVideoModel,
+      imageReferences.map((item) => subjectUrlByAssetId.get(item.assetId || "") || item.url)
+    );
     const normalizedVideoParams = normalizeVideoParamsForModel(selectedVideoModel, videoParams);
     updateNodeData(nodeId, {
       status: "running",

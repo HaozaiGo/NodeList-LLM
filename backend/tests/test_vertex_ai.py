@@ -1,18 +1,49 @@
 import base64
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 
-from api.routers.video import VideoGenerateRequest, _validate_generation_request
+from api.routers.video import VideoGenerateRequest, _generate_video_without_billing, _validate_generation_request
 from providers.vertex_ai import (
     VERTEX_IMAGE_MODEL,
     VERTEX_VIDEO_MODEL,
+    VertexImage,
     VertexAIError,
     _extract_generated_images,
+    create_vertex_video,
     decode_vertex_video_task,
     encode_vertex_video_task,
     vertex_video_status,
 )
+
+
+class _FakeResponse:
+    status_code = 200
+
+    @staticmethod
+    def json():
+        return {
+            "name": (
+                "projects/demo/locations/us-central1/publishers/google/models/"
+                "veo-3.1-fast-generate-001/operations/operation-123"
+            )
+        }
+
+
+class _FakeAsyncClient:
+    def __init__(self):
+        self.request_json = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+    async def post(self, _url, *, headers, json):
+        self.request_json = json
+        return _FakeResponse()
 
 
 class VertexAIProviderTests(unittest.TestCase):
@@ -119,6 +150,75 @@ class VertexAIProviderTests(unittest.TestCase):
     def test_expected_models_are_configured(self):
         self.assertEqual(VERTEX_IMAGE_MODEL, "gemini-2.5-flash-image")
         self.assertEqual(VERTEX_VIDEO_MODEL, "veo-3.1-fast-generate-001")
+
+
+class VertexAIVideoGenerationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_first_frame_is_sent_with_the_prompt(self):
+        client = _FakeAsyncClient()
+        first_frame = VertexImage(data=b"first-frame", mime_type="image/png")
+        with patch("providers.vertex_ai._auth_context", new=AsyncMock(return_value=("token", "demo"))):
+            with patch(
+                "providers.vertex_ai._download_reference_image",
+                new=AsyncMock(return_value=first_frame),
+            ):
+                with patch("providers.vertex_ai.httpx.AsyncClient", return_value=client):
+                    result = await create_vertex_video(
+                        prompt="The subject turns toward the camera",
+                        model=VERTEX_VIDEO_MODEL,
+                        aspect_ratio="16:9",
+                        resolution="720p",
+                        seconds=8,
+                        generate_audio=True,
+                        reference_image="data:image/png;base64,Zmlyc3QtZnJhbWU=",
+                    )
+
+        instance = client.request_json["instances"][0]
+        self.assertEqual(instance["prompt"], "The subject turns toward the camera")
+        self.assertEqual(instance["image"]["mimeType"], "image/png")
+        self.assertEqual(base64.b64decode(instance["image"]["bytesBase64Encoded"]), b"first-frame")
+        self.assertEqual(client.request_json["parameters"]["resizeMode"], "crop")
+        self.assertNotIn("task", client.request_json["parameters"])
+        self.assertEqual(result["request"]["task"], "imageToVideo")
+        self.assertEqual(result["request"]["reference_image_count"], 1)
+
+    async def test_router_resolves_and_forwards_only_the_first_image(self):
+        payload = VideoGenerateRequest(
+            prompt="Animate the first frame",
+            model=VERTEX_VIDEO_MODEL,
+            ratio="9:16",
+            resolution="720p",
+            seconds=8,
+            reference_images=["https://example.com/first.png", "https://example.com/second.png"],
+        )
+        resolve_image = AsyncMock(return_value=("data:image/png;base64,Zmlyc3Q=", "first.png"))
+        create_video = AsyncMock(return_value={"id": "vertex-veo:task", "status": "running"})
+        with patch("api.routers.video._image_reference_to_data_url", new=resolve_image):
+            with patch("api.routers.video.create_vertex_video", new=create_video):
+                await _generate_video_without_billing(payload, None, None)
+
+        resolve_image.assert_awaited_once_with(None, None, "https://example.com/first.png")
+        self.assertEqual(
+            create_video.await_args.kwargs["reference_image"],
+            "data:image/png;base64,Zmlyc3Q=",
+        )
+
+    async def test_text_only_request_remains_supported(self):
+        client = _FakeAsyncClient()
+        with patch("providers.vertex_ai._auth_context", new=AsyncMock(return_value=("token", "demo"))):
+            with patch("providers.vertex_ai.httpx.AsyncClient", return_value=client):
+                result = await create_vertex_video(
+                    prompt="A paper boat crosses a neon canal",
+                    model=VERTEX_VIDEO_MODEL,
+                    aspect_ratio="16:9",
+                    resolution="720p",
+                    seconds=8,
+                    generate_audio=True,
+                )
+
+        self.assertNotIn("image", client.request_json["instances"][0])
+        self.assertNotIn("task", client.request_json["parameters"])
+        self.assertEqual(result["request"]["task"], "textToVideo")
+        self.assertEqual(result["request"]["reference_image_count"], 0)
 
 
 if __name__ == "__main__":

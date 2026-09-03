@@ -33,7 +33,7 @@ export const fallbackVideoModels: VideoModelOption[] = [
 ];
 
 export const videoModelMeta: Record<string, { description: string; chip: string }> = {
-  "veo-3.1-fast-generate-001": { description: "Google Vertex AI 官方文生视频，支持原生音频、横竖画幅与 720p/1080p。", chip: "Vertex" },
+  "veo-3.1-fast-generate-001": { description: "Google Vertex AI 官方图文生视频，支持首帧图片、原生音频、横竖画幅与 720p/1080p。", chip: "Vertex" },
   "bds-pro": { description: "MiniMax H3 多参图生视频，支持首帧、主体、脸部、背景、姿态、尾帧等多图参考。", chip: "60s" },
   "seedance-2-0": { description: "支持多图参考。适合人物/场景/道具多素材合成，运动和叙事均衡。", chip: "60s" },
   "seedance-2-0-fast": { description: "支持多图参考。更快出片，适合6图参考的快速预览和多轮试错。", chip: "35s" },
@@ -57,6 +57,11 @@ export const videoSeconds: VideoGenerationParams["seconds"][] = [4, 5, 6, 8, 10,
 
 export function isVertexVeoModel(model: string) {
   return model === "veo-3.1-fast-generate-001";
+}
+
+export function videoReferenceImagesForModel(model: string, references: string[]) {
+  if (!isVertexVeoModel(model)) return references;
+  return references.filter((reference) => reference.trim()).slice(0, 1);
 }
 
 export function videoRatiosForModel(model: string) {

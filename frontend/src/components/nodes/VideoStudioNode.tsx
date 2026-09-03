@@ -57,6 +57,7 @@ import {
   videoModelMeta,
   videoModes,
   videoRatiosForModel,
+  videoReferenceImagesForModel,
   videoResolutionsForModel,
   videoSecondsForModel,
   type VideoGenerationParams,
@@ -865,7 +866,7 @@ function ReplacementCustomizePanel({
   const allowedVideoResolutions = videoResolutionsForModel(selectedModel);
   const allowedVideoSeconds = videoSecondsForModel(selectedModel);
   const allowedVideoModes = isVertexVeoModel(selectedModel)
-    ? [{ value: "reference" as const, label: "文生视频" }]
+    ? [{ value: "reference" as const, label: "图文生视频" }]
     : videoModes;
 
   useEffect(() => {
@@ -970,7 +971,7 @@ function ReplacementCustomizePanel({
       generate_audio: normalizedParams.generate_audio,
       watermark: normalizedParams.watermark,
       camerafixed: normalizedParams.camerafixed,
-      reference_images: references,
+      reference_images: videoReferenceImagesForModel(selectedModel, references),
     });
     onClose();
   };

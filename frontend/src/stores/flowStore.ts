@@ -31,6 +31,7 @@ import {
   type ImageGeneratePayload,
   type TextGeneratePayload,
 } from "@/lib/api";
+import { videoReferenceImagesForModel } from "@/lib/videoGenerationOptions";
 
 interface FlowState {
   flowId: string | null;
@@ -2251,6 +2252,10 @@ export const useFlowStore = create<FlowState>((set, get) => ({
   },
 
   runSeedanceGeneration: async (sourceAnalysisNodeId, payload) => {
+    payload = {
+      ...payload,
+      reference_images: videoReferenceImagesForModel(payload.model, payload.reference_images ?? []),
+    };
     const current = get();
     const sourceNode = current.nodes.find((node) => node.id === sourceAnalysisNodeId);
     if (!sourceNode) return;

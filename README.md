@@ -3,7 +3,8 @@
 ## Google Vertex AI 图片与视频生成
 
 画布的图片生成节点支持 `gemini-2.5-flash-image`，视频生成节点支持
-`veo-3.1-fast-generate-001`。两者都通过后端调用 Vertex AI，服务账号内容不会发送到浏览器。
+`veo-3.1-fast-generate-001`。Veo 在连接上游图片时会把第一张图片作为视频首帧，并与文本提示词一起生成视频；
+没有上游图片时则使用纯文生视频。两者都通过后端调用 Vertex AI，服务账号内容不会发送到浏览器。
 
 本地开发在 `backend/.env` 配置：
 
@@ -14,6 +15,7 @@ VERTEX_IMAGE_MODEL=gemini-2.5-flash-image
 VERTEX_IMAGE_LOCATION=global
 VERTEX_VIDEO_MODEL=veo-3.1-fast-generate-001
 VERTEX_VIDEO_LOCATION=us-central1
+VERTEX_VIDEO_INPUT_IMAGE_MAX_MB=20
 ```
 
 Veo 默认直接在异步操作响应中返回视频。生产环境建议额外配置

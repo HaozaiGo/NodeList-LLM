@@ -2186,6 +2186,10 @@ async def _generate_video_without_billing(
     model = _select_generation_model(payload)
     if is_vertex_video_model(model):
         try:
+            reference_image = ""
+            first_reference = next((item.strip() for item in payload.reference_images if item.strip()), "")
+            if first_reference:
+                reference_image, _ = await _image_reference_to_data_url(db, user, first_reference)
             return await create_vertex_video(
                 prompt=payload.prompt,
                 model=model,
@@ -2193,6 +2197,7 @@ async def _generate_video_without_billing(
                 resolution=payload.resolution,
                 seconds=payload.seconds,
                 generate_audio=payload.generate_audio,
+                reference_image=reference_image,
             )
         except VertexAIError as exc:
             raise _map_vertex_error(exc) from exc

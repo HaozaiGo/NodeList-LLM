@@ -25,6 +25,8 @@ VERTEX_IMAGE_TASK_PREFIX = "vertex-image:"
 VERTEX_VIDEO_TASK_PREFIX = "vertex-veo:"
 MAX_REFERENCE_IMAGE_BYTES = int(os.getenv("VERTEX_REFERENCE_IMAGE_MAX_MB", "10")) * 1024 * 1024
 MAX_REFERENCE_IMAGE_COUNT = int(os.getenv("VERTEX_REFERENCE_IMAGE_COUNT", "6"))
+VEO_INPUT_IMAGE_MAX_BYTES = int(os.getenv("VERTEX_VIDEO_INPUT_IMAGE_MAX_MB", "20")) * 1024 * 1024
+VEO_INPUT_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 
 class VertexAIError(Exception):
@@ -130,7 +132,7 @@ def _remote_error(response: httpx.Response, fallback: str) -> VertexAIError:
     return VertexAIError(status, f"{fallback}（HTTP {response.status_code}）：{detail}")
 
 
-def _decode_data_url(value: str) -> VertexImage | None:
+def _decode_data_url(value: str, max_bytes: int = MAX_REFERENCE_IMAGE_BYTES) -> VertexImage | None:
     if not value.startswith("data:"):
         return None
     header, separator, encoded = value.partition(",")
@@ -143,13 +145,16 @@ def _decode_data_url(value: str) -> VertexImage | None:
         data = base64.b64decode(encoded, validate=True)
     except (ValueError, binascii.Error) as exc:
         raise VertexAIError(400, "参考图 base64 数据无效") from exc
-    if len(data) > MAX_REFERENCE_IMAGE_BYTES:
+    if len(data) > max_bytes:
         raise VertexAIError(400, "单张 Vertex AI 参考图过大")
     return VertexImage(data=data, mime_type=mime_type)
 
 
-async def _download_reference_image(url: str) -> VertexImage:
-    inline = _decode_data_url(url)
+async def _download_reference_image(
+    url: str,
+    max_bytes: int = MAX_REFERENCE_IMAGE_BYTES,
+) -> VertexImage:
+    inline = _decode_data_url(url, max_bytes=max_bytes)
     if inline is not None:
         return inline
     parsed = urlparse(url)
@@ -162,7 +167,7 @@ async def _download_reference_image(url: str) -> VertexImage:
     except httpx.HTTPError as exc:
         raise VertexAIError(502, f"Vertex AI 参考图下载失败：{exc}") from exc
     data = response.content
-    if len(data) > MAX_REFERENCE_IMAGE_BYTES:
+    if len(data) > max_bytes:
         raise VertexAIError(400, "单张 Vertex AI 参考图过大")
     mime_type = (response.headers.get("content-type") or "image/png").split(";", 1)[0].strip()
     if not mime_type.startswith("image/"):
@@ -277,8 +282,16 @@ async def create_vertex_video(
     resolution: str,
     seconds: int,
     generate_audio: bool,
+    reference_image: str = "",
 ) -> dict[str, Any]:
     token, project = await _auth_context()
+    first_frame = (
+        await _download_reference_image(reference_image, max_bytes=VEO_INPUT_IMAGE_MAX_BYTES)
+        if reference_image.strip()
+        else None
+    )
+    task = "imageToVideo" if first_frame else "textToVideo"
+    instance: dict[str, Any] = {"prompt": prompt.strip()}
     parameters: dict[str, Any] = {
         "sampleCount": 1,
         "durationSeconds": seconds,
@@ -286,8 +299,18 @@ async def create_vertex_video(
         "resolution": resolution,
         "generateAudio": generate_audio,
         "enhancePrompt": True,
-        "task": "textToVideo",
     }
+    if first_frame:
+        mime_type = first_frame.mime_type.lower().strip()
+        if mime_type == "image/jpg":
+            mime_type = "image/jpeg"
+        if mime_type not in VEO_INPUT_IMAGE_MIME_TYPES:
+            raise VertexAIError(400, "Vertex Veo 首帧仅支持 JPEG、PNG 或 WebP 图片")
+        instance["image"] = {
+            "bytesBase64Encoded": base64.b64encode(first_frame.data).decode("ascii"),
+            "mimeType": mime_type,
+        }
+        parameters["resizeMode"] = "crop"
     if VERTEX_VIDEO_GCS_URI:
         parameters["storageUri"] = VERTEX_VIDEO_GCS_URI
     endpoint = _endpoint(project, VERTEX_VIDEO_LOCATION, model, "predictLongRunning")
@@ -296,7 +319,7 @@ async def create_vertex_video(
             response = await client.post(
                 endpoint,
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                json={"instances": [{"prompt": prompt.strip()}], "parameters": parameters},
+                json={"instances": [instance], "parameters": parameters},
             )
     except httpx.TimeoutException as exc:
         raise VertexAIError(504, "Vertex Veo 任务创建超时，请稍后重试") from exc
@@ -319,7 +342,8 @@ async def create_vertex_video(
             "resolution": resolution,
             "seconds": seconds,
             "generate_audio": generate_audio,
-            "task": "textToVideo",
+            "task": task,
+            "reference_image_count": 1 if first_frame else 0,
         },
     }
 
