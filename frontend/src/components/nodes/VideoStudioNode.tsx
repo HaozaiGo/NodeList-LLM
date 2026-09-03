@@ -2191,7 +2191,9 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
       ) : (
         <>
           {nodeData.description && (
-            <p className="mb-3 text-xs leading-5 text-zinc-400">{nodeData.description}</p>
+            <p className="mb-3 max-w-full break-words text-xs leading-5 text-zinc-400 [overflow-wrap:anywhere]">
+              {nodeData.description}
+            </p>
           )}
 
           {nodeType === "doubaoAnalysis" && (
@@ -2287,7 +2289,7 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
           )}
 
           {nodeType !== "videoStitcher" && items.length > 0 && (
-        <div className="space-y-1.5">
+        <div className="min-w-0 max-w-full space-y-1.5 overflow-hidden">
           {items.slice(0, 4).map((item, index) => {
             const canStartDoubao =
               (nodeType === "videoUpload" &&
@@ -2559,7 +2561,7 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
             return (
               <div
                 key={item}
-                className="rounded-lg border border-white/8 bg-white/[0.035] px-2.5 py-1.5 text-[11px] text-zinc-300"
+                className="w-full min-w-0 max-w-full overflow-hidden whitespace-pre-wrap break-words rounded-lg border border-white/8 bg-white/[0.035] px-2.5 py-1.5 text-[11px] text-zinc-300 [overflow-wrap:anywhere]"
               >
                 {item}
               </div>
