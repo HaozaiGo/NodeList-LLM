@@ -13,9 +13,15 @@ from sqlalchemy.orm import Session
 
 from auth import get_current_user
 from database import get_db
-from api.routers.video import LOVART_VIDEO_PREFIX, _download_lovart_video, _lovart_task_id
+from api.routers.video import (
+    LOVART_VIDEO_PREFIX,
+    _download_lovart_video,
+    _download_vertex_video,
+    _lovart_task_id,
+)
 from lovart import LovartClient, release_lovart_tasks
 from models import Asset, Flow, User
+from providers.vertex_ai import VERTEX_VIDEO_TASK_PREFIX
 from storage import object_key_for_asset, safe_storage_name, storage
 
 router = APIRouter(prefix="/assets", tags=["assets"])
@@ -223,6 +229,9 @@ async def _download_finished_video(task_id: str) -> tuple[bytes, str, str]:
     if task_id.startswith(f"{BDS_PRO_MODEL}:"):
         content, mime_type = await _download_bds_video(task_id)
         return content, mime_type, "bds-pro"
+    if task_id.startswith(VERTEX_VIDEO_TASK_PREFIX):
+        content, mime_type = await _download_vertex_video(task_id)
+        return content, mime_type, "vertex-ai"
     if task_id.startswith(LOVART_VIDEO_PREFIX):
         content, mime_type = await _download_lovart_video(task_id)
         return content, mime_type, "lovart"

@@ -4,9 +4,11 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 
+from api.routers.assets import _download_finished_video
 from api.routers.video import VideoGenerateRequest, _generate_video_without_billing, _validate_generation_request
 from providers.vertex_ai import (
     VERTEX_IMAGE_MODEL,
+    VERTEX_VIDEO_TASK_PREFIX,
     VERTEX_VIDEO_MODEL,
     VertexImage,
     VertexAIError,
@@ -153,6 +155,22 @@ class VertexAIProviderTests(unittest.TestCase):
 
 
 class VertexAIVideoGenerationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_project_asset_cache_downloads_vertex_video_with_vertex_provider(self):
+        download_vertex = AsyncMock(return_value=(b"video", "video/mp4"))
+        download_tokenops = AsyncMock()
+
+        with patch("api.routers.assets._download_vertex_video", new=download_vertex):
+            with patch("api.routers.assets._download_tokenops_video", new=download_tokenops):
+                content, mime_type, provider = await _download_finished_video(
+                    f"{VERTEX_VIDEO_TASK_PREFIX}encoded-operation"
+                )
+
+        self.assertEqual(content, b"video")
+        self.assertEqual(mime_type, "video/mp4")
+        self.assertEqual(provider, "vertex-ai")
+        download_vertex.assert_awaited_once()
+        download_tokenops.assert_not_awaited()
+
     async def test_first_frame_is_sent_with_the_prompt(self):
         client = _FakeAsyncClient()
         first_frame = VertexImage(data=b"first-frame", mime_type="image/png")
