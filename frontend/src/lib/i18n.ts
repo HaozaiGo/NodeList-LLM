@@ -713,6 +713,7 @@ export const UI_TRANSLATIONS: Record<string, string> = {
 };
 
 const UI_PATTERNS: Array<[RegExp, (...parts: string[]) => string]> = [
+  [/^未命名空间-(\d+)$/, (_, number) => `Untitled Canvas-${number}`],
   [/^(\d+) 节点 \/ (\d+) 连线$/, (_, nodes, edges) => `${nodes} nodes / ${edges} connections`],
   [/^(\d+) 流程 \/ (\d+) 资产$/, (_, flows, assets) => `${flows} flows / ${assets} assets`],
   [/^每页 (\d+) 条 · 共 (\d+) 位用户$/, (_, size, total) => `${size} per page · ${total} users`],

@@ -5,6 +5,7 @@ import type { FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, CalendarDays, FolderPlus, ImageIcon, LogOut, MoreHorizontal, Pencil, Plus, Trash2, X } from "lucide-react";
 import { BrandMark } from "@/components/branding/BrandMark";
+import { useLocale } from "@/components/i18n/I18nProvider";
 import { createFlow, deleteFlow, isAuthExpiredError, listFlows, resolveMediaUrl, saveFlow, type FlowRecord } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/authStore";
@@ -75,18 +76,19 @@ function flowStats(flow: FlowRecord) {
   return `${nodes.length} 节点 / ${edges.length} 连线`;
 }
 
-function nextUntitledSpaceName(flows: FlowRecord[]) {
+function nextUntitledSpaceName(flows: FlowRecord[], locale: "en" | "zh") {
   const usedNumbers = flows
-    .map((flow) => /^未命名空间-(\d+)$/.exec(flow.name || ""))
+    .map((flow) => /^(?:未命名空间|Untitled Canvas)-(\d+)$/.exec(flow.name || ""))
     .filter((match): match is RegExpExecArray => Boolean(match))
     .map((match) => Number(match[1]))
     .filter((value) => Number.isFinite(value));
   const nextNumber = usedNumbers.length ? Math.max(...usedNumbers) + 1 : 1;
-  return `未命名空间-${nextNumber}`;
+  return locale === "en" ? `Untitled Canvas-${nextNumber}` : `未命名空间-${nextNumber}`;
 }
 
 export default function ProjectsPage() {
   const router = useRouter();
+  const { locale } = useLocale();
   const { hydrate, hydrated, token, email, logout } = useAuthStore();
   const [flows, setFlows] = useState<FlowRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -148,7 +150,7 @@ export default function ProjectsPage() {
     setError("");
     try {
       const record = await createFlow({
-        name: nextUntitledSpaceName(flows),
+        name: nextUntitledSpaceName(flows, locale),
         nodes: [],
         edges: [],
       });
