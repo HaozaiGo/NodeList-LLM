@@ -385,7 +385,7 @@ function patchGeneratedImageAssetNode(
   return {
     label: preset.label,
     description: preset.description,
-    metric: preset.metric,
+    metric: preset.metric.replace("Lovart", imageProviderLabel(config.model, config.taskId)),
     accent: preset.accent,
     config: {
       images,
@@ -393,7 +393,7 @@ function patchGeneratedImageAssetNode(
       imageUrl: images.find((image) => image.id === primaryImageId)?.url ?? images[0]?.url ?? "",
       assetTag: tag,
     },
-    items: [...preset.items, generatedAssetSummary(config)].filter(Boolean),
+    items: preset.items,
   };
 }
 
@@ -973,8 +973,17 @@ function videoModelLabel(model: string): string {
     "veo-3-1": "Veo 3.1",
     "veo-3-1-fast": "Veo 3.1 Fast",
     "gemini-omni-flash": "Gemini Omni Flash",
+    "veo-3.1-fast-generate-001": "Veo 3.1 Fast · Vertex AI",
   };
   return labels[model] ?? "视频生成";
+}
+
+function imageProviderLabel(model: unknown, taskId: unknown = "") {
+  const modelValue = typeof model === "string" ? model : "";
+  const taskValue = typeof taskId === "string" ? taskId : "";
+  return modelValue === "gemini-2.5-flash-image" || taskValue.startsWith("vertex-image:")
+    ? "Vertex AI"
+    : "Lovart";
 }
 
 function placeDoubaoNodeNextToSource(
@@ -1882,13 +1891,14 @@ export const useFlowStore = create<FlowState>((set, get) => ({
     if (!node) return;
     const outputSummary = `${payload.ratio} · ${payload.quality || "标准画质"} · ${payload.resolution} · ${payload.count || 1}张`;
     const outputTag = normalizeImageAssetTag(payload.asset_tag ?? node.data.config.assetTag);
+    const providerLabel = imageProviderLabel(payload.model);
     imageRecoveryAttempts.delete(nodeId);
 
     set({
       nodes: patchNodes(get().nodes, {
         [nodeId]: {
           status: "running",
-          metric: "Lovart 生成中",
+          metric: `${providerLabel} 生成中`,
           config: {
             model: payload.model,
             ratio: payload.ratio,
@@ -1904,7 +1914,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
             generationStatus: "submitting",
             submittedAt: new Date().toISOString(),
           },
-          items: ["提交 Lovart 任务中", "参考素材已带入", outputSummary],
+          items: [`提交 ${providerLabel} 任务中`, "参考素材已带入", outputSummary],
         },
       }),
     });
@@ -1915,14 +1925,14 @@ export const useFlowStore = create<FlowState>((set, get) => ({
       set({
         nodes: patchNodes(get().nodes, {
           [nodeId]: {
-            metric: "Lovart 已排队",
+            metric: `${providerLabel} 已提交`,
             config: {
               taskId: created.id,
               projectId: created.projectId ?? "",
               generationStatus: created.status,
               taskCreatedAt: new Date().toISOString(),
             },
-            items: ["Lovart 生成中", "正在获取结果", outputSummary],
+            items: [`${providerLabel} 生成中`, "正在获取结果", outputSummary],
           },
         }),
       });
@@ -1972,7 +1982,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
           const images: ImageAssetItem[] = status.assets.map((asset, index) => ({
             id: asset.id || `lovart-${created.id}-${index + 1}`,
             assetId: asset.id,
-            name: asset.title || `Lovart 生成图 ${index + 1}`,
+            name: asset.title || `${providerLabel} 生成图 ${index + 1}`,
             url: asset.previewUrl || asset.url,
             storageKey: asset.storageKey,
             tag: outputTag,
@@ -1999,7 +2009,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
             images,
             primaryImageId: primary?.id ?? "",
             imageUrl: primary?.url ?? "",
-            fileName: images.length === 1 ? primary?.name ?? "Lovart 生成图" : `${images.length} 张 Lovart 生成图`,
+            fileName: images.length === 1 ? primary?.name ?? `${providerLabel} 生成图` : `${images.length} 张 ${providerLabel} 生成图`,
             assetTag: outputTag,
           };
           set({
@@ -2024,7 +2034,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
             nodes: patchNodes(get().nodes, {
               [nodeId]: {
                 status: "error",
-                metric: "Lovart 生成失败",
+                metric: `${providerLabel} 生成失败`,
             config: { generationStatus: "failed", error: status.error, userPrompt: payload.user_prompt ?? payload.prompt },
                 items: ["生成失败", status.error || "请调整提示词或模型后重试"],
               },
@@ -2038,9 +2048,9 @@ export const useFlowStore = create<FlowState>((set, get) => ({
         set({
           nodes: patchNodes(get().nodes, {
             [nodeId]: {
-              metric: `Lovart 生成中 ${attempt + 1}/36`,
+              metric: `${providerLabel} 生成中 ${attempt + 1}/36`,
               config: { generationStatus: status.status },
-              items: ["Lovart 生成中", "正在获取结果", outputSummary],
+              items: [`${providerLabel} 生成中`, "正在获取结果", outputSummary],
             },
           }),
         });
@@ -2050,7 +2060,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
         nodes: patchNodes(get().nodes, {
           [nodeId]: {
             status: "queued",
-            metric: "Lovart 仍在生成",
+            metric: `${providerLabel} 仍在生成`,
             config: { generationStatus: "timeout", taskId: created.id, userPrompt: payload.user_prompt ?? payload.prompt },
             items: ["生成仍在进行", "稍后可重试查询结果", outputSummary],
           },
@@ -2058,14 +2068,14 @@ export const useFlowStore = create<FlowState>((set, get) => ({
       });
       scheduleAutoSave(get);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Lovart 图片生成失败";
+      const message = error instanceof Error ? error.message : `${providerLabel} 图片生成失败`;
       set({
         nodes: patchNodes(get().nodes, {
           [nodeId]: {
             status: "error",
-            metric: "Lovart 生成失败",
+            metric: `${providerLabel} 生成失败`,
             config: { generationStatus: "failed", error: message, userPrompt: payload.user_prompt ?? payload.prompt },
-            items: [message.slice(0, 80), "请检查 Lovart key / 模型 / 参数"],
+            items: [message.slice(0, 80), `请检查 ${providerLabel} 鉴权 / 模型 / 参数`],
           },
         }),
       });
@@ -2081,9 +2091,10 @@ export const useFlowStore = create<FlowState>((set, get) => ({
     const taskId = imageGenerationTaskId(node);
     const config = node.data.config;
     const generationStatus = String(config.generationStatus || "").toLowerCase();
-    const outputSummary = generatedAssetSummary(config) || "Lovart 图片生成";
     const outputTag = normalizeImageAssetTag(config.assetTag);
     const model = typeof config.model === "string" ? config.model : undefined;
+    const providerLabel = imageProviderLabel(model, taskId);
+    const outputSummary = generatedAssetSummary(config) || `${providerLabel} 图片生成`;
     const pollStartedAt = generationStartedAt(config.taskCreatedAt ?? config.submittedAt);
 
     if (!taskId) {
@@ -2092,7 +2103,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
           nodes: patchNodes(get().nodes, {
             [nodeId]: {
               status: "error",
-              metric: "Lovart 提交中断",
+              metric: `${providerLabel} 提交中断`,
               config: {
                 generationStatus: "failed",
                 error: "未拿到远端任务 ID，请重新生成",
@@ -2113,7 +2124,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
         nodes: patchNodes(get().nodes, {
           [nodeId]: {
             status: "running",
-            metric: "Lovart 恢复查询中",
+            metric: `${providerLabel} 恢复查询中`,
             config: { taskId, generationStatus: "running", error: "" },
             items: ["正在恢复图片生成结果", `任务 ID：${taskId}`, outputSummary],
           },
@@ -2143,7 +2154,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
         const images: ImageAssetItem[] = status.assets.map((asset, index) => ({
           id: asset.id || `lovart-${taskId}-${index + 1}`,
           assetId: asset.id,
-          name: asset.title || `Lovart 生成图 ${index + 1}`,
+          name: asset.title || `${providerLabel} 生成图 ${index + 1}`,
           url: asset.previewUrl || asset.url,
           storageKey: asset.storageKey,
           tag: outputTag,
@@ -2165,7 +2176,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
           images,
           primaryImageId: primary?.id ?? "",
           imageUrl: primary?.url ?? "",
-          fileName: images.length === 1 ? primary?.name ?? "Lovart 生成图" : `${images.length} 张 Lovart 生成图`,
+          fileName: images.length === 1 ? primary?.name ?? `${providerLabel} 生成图` : `${images.length} 张 ${providerLabel} 生成图`,
           assetTag: outputTag,
           error: "",
         };
@@ -2190,7 +2201,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
           nodes: patchNodes(get().nodes, {
             [nodeId]: {
               status: "error",
-              metric: "Lovart 生成失败",
+              metric: `${providerLabel} 生成失败`,
               config: { taskId, generationStatus: "failed", error: message },
               items: ["生成失败", message.slice(0, 80), "请调整提示词或模型后重试"],
             },
@@ -2208,7 +2219,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
         nodes: patchNodes(get().nodes, {
           [nodeId]: {
             status: "queued",
-            metric: "Lovart 仍在生成",
+            metric: `${providerLabel} 仍在生成`,
             config: { taskId, generationStatus: "timeout" },
             items: ["生成仍在进行", "后台会继续恢复查询", outputSummary],
           },
@@ -2563,7 +2574,8 @@ export const useFlowStore = create<FlowState>((set, get) => ({
       });
       scheduleAutoSave(get);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Seedance 视频生成失败";
+      const providerHint = payload.model === "veo-3.1-fast-generate-001" ? "Vertex AI 鉴权 / 配额" : "模型服务 key / 余额";
+      const message = error instanceof Error ? error.message : `${videoModelLabel(payload.model)} 视频生成失败`;
       set({
         nodes: patchNodes(get().nodes, {
           [targetId]: {
@@ -2583,7 +2595,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
               referenceImageCount,
               generationSpec: payload.generation_spec,
             },
-            items: ["任务创建失败", message.slice(0, 80), "请检查 TokenOps key / 余额 / 参数"],
+            items: ["任务创建失败", message.slice(0, 80), `请检查 ${providerHint} / 参数`],
           },
         }),
       });

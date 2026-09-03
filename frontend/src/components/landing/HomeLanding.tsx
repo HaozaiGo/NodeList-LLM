@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 
 import { BrandMark } from "@/components/branding/BrandMark";
+import { GoogleSignInButton, preloadGoogleSignIn } from "@/components/auth/GoogleSignInButton";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/authStore";
 
@@ -115,6 +116,10 @@ function getAuthErrorMessage(error: unknown, mode: AuthMode) {
   if (message.includes("Email already registered")) return "该邮箱已注册，请切换到登录。";
   if (message.includes("Password must be at least 6 characters")) return "密码至少需要 6 位字符。";
   if (message.includes("Account disabled")) return "该账号已被禁用，请联系管理员。";
+  if (message.includes("Invalid Google credential") || message.includes("Google email is not verified")) {
+    return "Google 授权无效，请重新选择账号。";
+  }
+  if (message.includes("Google login is not configured")) return "Google 登录尚未配置，请使用邮箱登录。";
   if (message.includes("Failed to fetch") || message.includes("NetworkError")) {
     return "无法连接后端服务，请确认 API 已启动。";
   }
@@ -135,11 +140,13 @@ function AuthDialog({
   onModeChange: (mode: AuthMode) => void;
 }) {
   const router = useRouter();
-  const { login, register } = useAuthStore();
+  const { login, register, loginWithGoogle } = useAuthStore();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
+  const [googleAvailable, setGoogleAvailable] = useState(true);
 
   useEffect(() => {
     if (!open) return;
@@ -174,6 +181,20 @@ function AuthDialog({
     }
   };
 
+  const submitGoogle = async (credential: string) => {
+    setError("");
+    setGoogleLoading(true);
+    try {
+      await loginWithGoogle(credential);
+      router.replace("/projects");
+      router.refresh();
+    } catch (err) {
+      setError(getAuthErrorMessage(err, mode));
+    } finally {
+      setGoogleLoading(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 px-4 py-8 backdrop-blur-xl">
       <div className="relative w-full max-w-[440px] overflow-hidden rounded-[28px] border border-white/12 bg-[#111119]/95 p-6 text-zinc-100 shadow-[0_30px_120px_rgba(0,0,0,0.65)]">
@@ -204,7 +225,24 @@ function AuthDialog({
               : "登录或注册后即可进入 AI 视频制作工作台。"}
           </p>
 
-          <div className="mt-6 grid grid-cols-2 gap-2 rounded-full border border-white/10 bg-black/30 p-1">
+          <div className="mt-6">
+            <GoogleSignInButton
+              loading={googleLoading}
+              onCredential={(credential) => void submitGoogle(credential)}
+              onError={setError}
+              onAvailabilityChange={setGoogleAvailable}
+            />
+          </div>
+
+          {googleAvailable && (
+            <div className="mt-5 flex items-center gap-3 text-xs text-zinc-600">
+              <span className="h-px flex-1 bg-white/10" />
+              <span>或使用邮箱</span>
+              <span className="h-px flex-1 bg-white/10" />
+            </div>
+          )}
+
+          <div className={cn("grid grid-cols-2 gap-2 rounded-full border border-white/10 bg-black/30 p-1", googleAvailable ? "mt-5" : "mt-6")}>
             {[
               ["login", "登录"],
               ["register", "注册"],
@@ -265,11 +303,11 @@ function AuthDialog({
 
             <button
               type="submit"
-              disabled={loading}
+              disabled={loading || googleLoading}
               className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-fuchsia-500 text-sm font-bold text-white shadow-[0_16px_44px_rgba(236,34,208,0.42)] transition hover:bg-fuchsia-400 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {loading ? "处理中..." : mode === "login" ? "登录并进入工作台" : "注册并开始创作"}
-              {!loading && <ArrowRight className="size-4" />}
+              {loading || googleLoading ? "处理中..." : mode === "login" ? "登录并进入工作台" : "注册并开始创作"}
+              {!loading && !googleLoading && <ArrowRight className="size-4" />}
             </button>
           </form>
         </div>
@@ -469,6 +507,10 @@ export function HomeLanding({
   };
 
   useEffect(() => {
+    preloadGoogleSignIn();
+  }, []);
+
+  useEffect(() => {
     const updateScrolled = () => setScrolled(window.scrollY > 24);
     updateScrolled();
     window.addEventListener("scroll", updateScrolled, { passive: true });
@@ -652,6 +694,15 @@ export function HomeLanding({
           </p>
         </div>
       </section>
+      <footer className="border-t border-white/10 px-5 py-7 text-sm text-zinc-500 sm:px-8 lg:px-12">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4">
+          <span>© 2026 enepath.ai</span>
+          <div className="flex items-center gap-5">
+            <Link href="/privacy" className="transition hover:text-white">隐私政策</Link>
+            <Link href="/terms" className="transition hover:text-white">服务条款</Link>
+          </div>
+        </div>
+      </footer>
       <AuthDialog
         open={authOpen}
         mode={authMode}

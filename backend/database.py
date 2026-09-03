@@ -66,6 +66,13 @@ def migrate_schema():
             else:
                 conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMP"))
 
+        if "google_sub" not in user_columns:
+            if engine.dialect.name == "sqlite":
+                conn.execute(text("ALTER TABLE users ADD COLUMN google_sub VARCHAR"))
+            else:
+                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS google_sub VARCHAR"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_google_sub ON users (google_sub)"))
+
         admin_emails = [email.strip().lower() for email in os.getenv("ADMIN_EMAILS", "").split(",") if email.strip()]
         for email in admin_emails:
             conn.execute(text("UPDATE users SET role = 'admin' WHERE lower(email) = :email"), {"email": email})

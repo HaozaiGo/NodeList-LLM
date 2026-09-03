@@ -6,7 +6,7 @@ export type VideoGenerationParams = {
   mode: VideoGenerationMode;
   ratio: string;
   resolution: "480p" | "720p" | "1080p" | "4k";
-  seconds: 5 | 8 | 10 | 15;
+  seconds: 4 | 5 | 6 | 8 | 10 | 15;
   generate_audio: boolean;
   camerafixed: boolean;
 };
@@ -20,6 +20,7 @@ export const hiddenVideoModels = new Set([
 ]);
 
 export const fallbackVideoModels: VideoModelOption[] = [
+  { model: "veo-3.1-fast-generate-001", label: "Veo 3.1 Fast · Vertex AI" },
   { model: "bds-pro", label: "MiniMax h3" },
   { model: "seedance-2-0", label: "Seedance 2.0" },
   { model: "seedance-2-0-fast", label: "Seedance 2.0 Fast" },
@@ -32,6 +33,7 @@ export const fallbackVideoModels: VideoModelOption[] = [
 ];
 
 export const videoModelMeta: Record<string, { description: string; chip: string }> = {
+  "veo-3.1-fast-generate-001": { description: "Google Vertex AI 官方文生视频，支持原生音频、横竖画幅与 720p/1080p。", chip: "Vertex" },
   "bds-pro": { description: "MiniMax H3 多参图生视频，支持首帧、主体、脸部、背景、姿态、尾帧等多图参考。", chip: "60s" },
   "seedance-2-0": { description: "支持多图参考。适合人物/场景/道具多素材合成，运动和叙事均衡。", chip: "60s" },
   "seedance-2-0-fast": { description: "支持多图参考。更快出片，适合6图参考的快速预览和多轮试错。", chip: "35s" },
@@ -51,7 +53,23 @@ export const videoModes: Array<{ value: VideoGenerationMode; label: string }> = 
 
 export const videoRatios = ["Auto", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"];
 export const videoResolutions: VideoGenerationParams["resolution"][] = ["480p", "720p", "1080p", "4k"];
-export const videoSeconds: VideoGenerationParams["seconds"][] = [5, 8, 10, 15];
+export const videoSeconds: VideoGenerationParams["seconds"][] = [4, 5, 6, 8, 10, 15];
+
+export function isVertexVeoModel(model: string) {
+  return model === "veo-3.1-fast-generate-001";
+}
+
+export function videoRatiosForModel(model: string) {
+  return isVertexVeoModel(model) ? ["16:9", "9:16"] : videoRatios;
+}
+
+export function videoResolutionsForModel(model: string): VideoGenerationParams["resolution"][] {
+  return isVertexVeoModel(model) ? ["720p", "1080p"] : videoResolutions;
+}
+
+export function videoSecondsForModel(model: string): VideoGenerationParams["seconds"][] {
+  return isVertexVeoModel(model) ? [4, 6, 8] : videoSeconds;
+}
 
 export function modelLabel(options: Array<{ model: string; label: string }>, model: string, fallback: string) {
   if (model === "bds-pro") return "MiniMax h3";
@@ -73,6 +91,15 @@ export function resolveDefaultVideoModel(defaultModel: string | undefined, optio
 }
 
 export function normalizeVideoParamsForModel(model: string, params: VideoGenerationParams): VideoGenerationParams {
+  if (isVertexVeoModel(model)) {
+    return {
+      ...params,
+      mode: "reference",
+      ratio: params.ratio === "16:9" ? "16:9" : "9:16",
+      resolution: params.resolution === "1080p" ? "1080p" : "720p",
+      seconds: params.seconds === 4 || params.seconds === 6 ? params.seconds : 8,
+    };
+  }
   return {
     ...params,
     ratio: params.ratio === "Auto" ? "9:16" : params.ratio,

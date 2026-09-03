@@ -20,7 +20,9 @@ import {
   Link2,
   LogOut,
   Map as MapIcon,
+  Maximize2,
   Monitor,
+  Minimize2,
   PackageCheck,
   Play,
   Plus,
@@ -61,15 +63,16 @@ import {
 import {
   fallbackVideoModels,
   hiddenVideoModels,
+  isVertexVeoModel,
   modelLabel,
   normalizeVideoModelOptions,
   normalizeVideoParamsForModel,
   resolveDefaultVideoModel,
   videoModelMeta,
   videoModes,
-  videoRatios,
-  videoResolutions,
-  videoSeconds,
+  videoRatiosForModel,
+  videoResolutionsForModel,
+  videoSecondsForModel,
   type VideoGenerationParams,
 } from "@/lib/videoGenerationOptions";
 import { useAuthStore } from "@/stores/authStore";
@@ -101,6 +104,7 @@ function displayNodeStatus(node: NodeData): StudioNodeStatus {
 }
 
 const fallbackImageModels: ImageModelOption[] = [
+  { model: "gemini-2.5-flash-image", label: "Gemini 2.5 Flash Image · Vertex AI" },
   { model: "nano-banana-pro", label: "Nano Banana Pro" },
   { model: "nano-banana-2", label: "Nano Banana 2" },
   { model: "nano-banana-2-lite", label: "Nano Banana 2 Lite" },
@@ -117,6 +121,7 @@ const fallbackTextModels: TextModelOption[] = [
 ];
 
 const imageModelMeta: Record<string, { description: string; chip: string }> = {
+  "gemini-2.5-flash-image": { description: "Google Vertex AI 官方多模态生图，支持文本与参考图输入", chip: "Vertex" },
   "nano-banana-pro": { description: "高质量图片生成，适合精修质感", chip: "60s" },
   "nano-banana-2": { description: "通用图片生成，主体一致性更稳", chip: "50s" },
   "nano-banana-2-lite": { description: "轻量快速，适合草图探索", chip: "25s" },
@@ -145,6 +150,20 @@ const imageQualities: ImageQuality[] = ["低画质", "标准画质", "高画质"
 const imageResolutions: ImageGenerationParams["resolution"][] = ["1K", "2K", "4K"];
 const imageRatios = ["1:1", "1:2", "2:1", "9:16", "16:9", "3:4", "4:3", "3:2", "2:3", "5:4", "4:5", "21:9", "9:21"];
 const imageCounts: ImageGenerationParams["count"][] = [1, 2, 4];
+const vertexImageRatios = ["1:1", "9:16", "16:9", "3:4", "4:3", "3:2", "2:3", "5:4", "4:5", "21:9"];
+
+function isVertexImageModel(model: string) {
+  return model === "gemini-2.5-flash-image";
+}
+
+function imageRatiosForModel(model: string) {
+  return isVertexImageModel(model) ? vertexImageRatios : imageRatios;
+}
+
+function normalizeImageParamsForModel(model: string, params: ImageGenerationParams): ImageGenerationParams {
+  if (!isVertexImageModel(model) || vertexImageRatios.includes(params.ratio)) return params;
+  return { ...params, ratio: params.ratio.startsWith("9:") || params.ratio === "1:2" ? "9:16" : "16:9" };
+}
 
 const settingImageOptions = [
   {
@@ -1444,6 +1463,7 @@ function Composer({
   const [modelOpen, setModelOpen] = useState(false);
   const [paramsOpen, setParamsOpen] = useState(false);
   const [presetOpen, setPresetOpen] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const [selectedSetting, setSelectedSetting] = useState<(typeof settingImageOptions)[number] | null>(null);
   const [prompt, setPrompt] = useState("");
   const modelControlRef = useRef<HTMLDivElement>(null);
@@ -1455,12 +1475,11 @@ function Composer({
   const visibleReferences = references.slice(0, 4);
   const imageReferenceCount = references.filter((item) => item.kind === "image").length;
   const referenceBadgeCount = references.length;
-  const limitedVideoReferenceModel = false;
-  const videoReferenceLimit = 2;
+  const vertexTextToVideo = isVertexVeoModel(selectedVideoModel);
   const videoReferenceHint =
     isVideoGenerationNode && imageReferenceCount > 0
-      ? limitedVideoReferenceModel
-        ? `当前模型最多使用前${videoReferenceLimit}张图，${imageReferenceCount > videoReferenceLimit ? `其余${imageReferenceCount - videoReferenceLimit}张会写入提示词` : "适合首帧/首尾帧控制"}`
+      ? vertexTextToVideo
+        ? "Vertex Veo 当前使用文生视频：参考图会转为提示上下文，不直接上传图片"
         : `当前模型支持多图参考，将引用${imageReferenceCount}张图片`
       : "";
   const selectedModelLabel = isVideoGenerationNode
@@ -1474,6 +1493,13 @@ function Composer({
     ? "剧本 · 分镜 · 台词"
     : `${imageParams.ratio} · ${imageParams.quality} · ${imageParams.resolution} · ${imageParams.count}张`;
   const videoParamsLabel = `${videoParams.ratio} · ${videoParams.resolution} · ${videoParams.seconds}s`;
+  const allowedVideoRatios = videoRatiosForModel(selectedVideoModel);
+  const allowedVideoResolutions = videoResolutionsForModel(selectedVideoModel);
+  const allowedVideoSeconds = videoSecondsForModel(selectedVideoModel);
+  const allowedVideoModes = isVertexVeoModel(selectedVideoModel)
+    ? [{ value: "reference" as const, label: "文生视频" }]
+    : videoModes;
+  const allowedImageRatios = imageRatiosForModel(selectedImageModel);
   const SelectedSettingIcon = selectedSetting?.icon;
   const composerPlaceholder = isVideoGenerationNode
     ? "输入视频生成要求，如：根据上游剧本和参考图，生成 8 秒镜头，写清镜头运动、人物动作、情绪节奏和画面风格"
@@ -1536,15 +1562,42 @@ function Composer({
     return () => document.removeEventListener("pointerdown", handlePointerDown, true);
   }, [modelOpen, paramsOpen, presetOpen]);
 
+  useEffect(() => {
+    if (!expanded) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setExpanded(false);
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [expanded]);
+
   return (
     <>
+      {expanded && (
+        <button
+          className="pointer-events-auto fixed inset-0 z-[59] cursor-default bg-black/55 backdrop-blur-sm"
+          onClick={() => setExpanded(false)}
+          aria-label="还原对话框"
+        />
+      )}
       <div
         className={cn(
-          "pointer-events-auto absolute bottom-6 left-1/2 z-20 w-[820px] -translate-x-1/2 rounded-[22px] border border-white/10 bg-[#282828]/96 p-4 shadow-2xl backdrop-blur transition-all duration-300 ease-out",
+          "pointer-events-auto left-1/2 -translate-x-1/2 rounded-[22px] border border-white/10 bg-[#282828]/96 p-4 shadow-2xl backdrop-blur transition-all duration-300 ease-out",
+          expanded
+            ? "fixed bottom-8 z-[60] w-[min(1080px,calc(100vw-48px))]"
+            : "absolute bottom-6 z-20 w-[min(820px,calc(100vw-32px))]",
           collapsed ? "pointer-events-none translate-y-[148px] opacity-0" : "translate-y-0 opacity-100"
         )}
         aria-hidden={collapsed}
       >
+        <button
+          className="nodrag nopan absolute right-3 top-3 flex size-9 items-center justify-center rounded-full border border-white/10 bg-white/[0.055] text-zinc-400 transition hover:border-white/20 hover:bg-white/10 hover:text-white"
+          onClick={() => setExpanded((value) => !value)}
+          aria-label={expanded ? "还原对话框" : "放大对话框"}
+          title={expanded ? "还原对话框" : "放大对话框"}
+        >
+          {expanded ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
+        </button>
         <div className="min-h-[118px]">
           {references.length > 0 ? (
             <div className="mb-5 flex items-center gap-3">
@@ -1605,7 +1658,7 @@ function Composer({
                     <span
                       className={cn(
                         "rounded-full border px-2.5 py-1 text-[11px] font-semibold",
-                        limitedVideoReferenceModel && imageReferenceCount > 2
+                        vertexTextToVideo
                           ? "border-amber-300/25 bg-amber-400/10 text-amber-100"
                           : "border-cyan-300/25 bg-cyan-400/10 text-cyan-100"
                       )}
@@ -1652,7 +1705,10 @@ function Composer({
               </div>
             )}
             <textarea
-              className="nodrag nopan block h-14 min-w-0 flex-1 resize-none bg-transparent text-sm leading-6 text-zinc-100 outline-none placeholder:text-zinc-500"
+              className={cn(
+                "nodrag nopan block min-w-0 flex-1 resize-none bg-transparent text-sm leading-6 text-zinc-100 outline-none placeholder:text-zinc-500",
+                expanded ? "h-[min(42vh,420px)] min-h-[220px]" : "h-14"
+              )}
               placeholder={composerPlaceholder}
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
@@ -1795,7 +1851,7 @@ function Composer({
 
                 <p className="mb-2 text-sm font-semibold text-zinc-300">比例</p>
                 <div className="mb-4 grid grid-cols-5 gap-2">
-                  {imageRatios.map((ratio) => (
+                  {allowedImageRatios.map((ratio) => (
                     <button
                       key={ratio}
                       className={cn(
@@ -1843,7 +1899,7 @@ function Composer({
 
                 <p className="mb-2 text-xs font-semibold text-zinc-400">生成方式</p>
                 <div className="mb-5 grid grid-cols-3 rounded-xl bg-white/[0.045] p-1">
-                  {videoModes.map((mode) => (
+                  {allowedVideoModes.map((mode) => (
                     <button
                       key={mode.value}
                       className={cn(
@@ -1861,7 +1917,7 @@ function Composer({
 
                 <p className="mb-2 text-xs font-semibold text-zinc-400">宽高比</p>
                 <div className="mb-5 grid grid-cols-4 gap-2">
-                  {videoRatios.map((ratio) => {
+                  {allowedVideoRatios.map((ratio) => {
                     const active = videoParams.ratio === ratio;
                     const isAuto = ratio === "Auto";
                     return (
@@ -1895,19 +1951,19 @@ function Composer({
                 <div className="mb-5">
                   <div className="mb-2 flex items-center justify-between text-xs">
                     <span className="font-semibold text-zinc-400">时长</span>
-                    <span className="text-zinc-500">{videoParams.seconds}s / max 15s</span>
+                    <span className="text-zinc-500">{videoParams.seconds}s / max {allowedVideoSeconds.at(-1)}s</span>
                   </div>
                   <input
                     className="w-full accent-white"
                     type="range"
                     min={0}
-                    max={videoSeconds.length - 1}
+                    max={allowedVideoSeconds.length - 1}
                     step={1}
-                    value={videoSeconds.indexOf(videoParams.seconds)}
-                    onChange={(event) => updateVideoParams({ seconds: videoSeconds[Number(event.target.value)] })}
+                    value={allowedVideoSeconds.indexOf(videoParams.seconds)}
+                    onChange={(event) => updateVideoParams({ seconds: allowedVideoSeconds[Number(event.target.value)] })}
                   />
                   <div className="mt-1 flex justify-between text-[10px] text-zinc-500">
-                    {videoSeconds.map((second) => (
+                    {allowedVideoSeconds.map((second) => (
                       <span key={second}>{second}s</span>
                     ))}
                   </div>
@@ -1915,7 +1971,7 @@ function Composer({
 
                 <p className="mb-2 text-xs font-semibold text-zinc-400">分辨率</p>
                 <div className="mb-5 flex flex-wrap gap-2">
-                  {videoResolutions.map((resolution) => (
+                  {allowedVideoResolutions.map((resolution) => (
                     <button
                       key={resolution}
                       className={cn(
@@ -2367,9 +2423,11 @@ function StudioShell() {
   }, [isTextGenerationNode, selectedNode]);
 
   const handleSelectImageModel = (model: string) => {
+    const nextParams = normalizeImageParamsForModel(model, imageParams);
     setSelectedImageModel(model);
+    setImageParams(nextParams);
     if (selectedNodeId && isImageGenerationNode) {
-      updateNodeConfig(selectedNodeId, { model });
+      updateNodeConfig(selectedNodeId, { model, ratio: nextParams.ratio });
     }
   };
 
@@ -2671,7 +2729,8 @@ function StudioShell() {
     ]
       .filter(Boolean)
       .join("\n\n");
-    const finalPrompt = buildImagePromptWithUpstream(promptForGeneration, upstreamContext, imageParams);
+    const normalizedImageParams = normalizeImageParamsForModel(selectedImageModel, imageParams);
+    const finalPrompt = buildImagePromptWithUpstream(promptForGeneration, upstreamContext, normalizedImageParams);
 
     setActiveGenerationNodeIds((current) => new Set(current).add(nodeId));
     try {
@@ -2684,10 +2743,10 @@ function StudioShell() {
           ? settingAssetTag(options.settingLabel)
           : settingAssetTag(String(selectedNode.data.config.assetTag || "")),
         model: selectedImageModel,
-        ratio: imageParams.ratio,
-        resolution: imageParams.resolution,
-        quality: imageParams.quality,
-        count: imageParams.count,
+        ratio: normalizedImageParams.ratio,
+        resolution: normalizedImageParams.resolution,
+        quality: normalizedImageParams.quality,
+        count: normalizedImageParams.count,
         reference_images: references,
         flowId,
         nodeId,

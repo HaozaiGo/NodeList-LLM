@@ -100,6 +100,11 @@ export interface AuthResponse {
   email: string;
 }
 
+export interface GoogleAuthConfig {
+  enabled: boolean;
+  client_id: string;
+}
+
 export interface VideoAnalysisResponse {
   model: string;
   file_uri: string;
@@ -440,6 +445,20 @@ export async function login(email: string, password: string): Promise<AuthRespon
     if (error instanceof Error) throw error;
     throw new Error("登录失败，请检查网络或稍后重试");
   }
+}
+
+export async function getGoogleAuthConfig(): Promise<GoogleAuthConfig> {
+  const r = await fetch(`${BASE}/api/auth/google/config`, { cache: "no-store" });
+  return readJsonOrThrow<GoogleAuthConfig>(r, "Google 登录配置获取失败");
+}
+
+export async function loginWithGoogle(credential: string): Promise<AuthResponse> {
+  const r = await fetch(`${BASE}/api/auth/google`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ credential }),
+  });
+  return readJsonOrThrow<AuthResponse>(r, "Google 登录失败");
 }
 
 export async function listFlows(): Promise<FlowRecord[]> {

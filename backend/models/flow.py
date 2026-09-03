@@ -12,6 +12,7 @@ class User(Base):
     id = Column(String, primary_key=True)
     email = Column(String, unique=True, nullable=False, index=True)
     hashed_password = Column(String, nullable=False)
+    google_sub = Column(String, unique=True, nullable=True, index=True)
     role = Column(String, nullable=False, default="user", server_default="user", index=True)
     credit_balance = Column(Integer, nullable=False, default=0, server_default="0")
     disabled_at = Column(DateTime, nullable=True)

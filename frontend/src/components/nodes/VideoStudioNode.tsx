@@ -49,15 +49,16 @@ import {
 } from "@/lib/api";
 import {
   fallbackVideoModels,
+  isVertexVeoModel,
   modelLabel,
   normalizeVideoModelOptions,
   normalizeVideoParamsForModel,
   resolveDefaultVideoModel,
   videoModelMeta,
   videoModes,
-  videoRatios,
-  videoResolutions,
-  videoSeconds,
+  videoRatiosForModel,
+  videoResolutionsForModel,
+  videoSecondsForModel,
   type VideoGenerationParams,
 } from "@/lib/videoGenerationOptions";
 
@@ -860,6 +861,12 @@ function ReplacementCustomizePanel({
   ]).size;
   const selectedModelLabel = modelLabel(videoModels, selectedModel, "视频模型");
   const paramsLabel = `${params.ratio} · ${params.resolution} · ${params.seconds}s`;
+  const allowedVideoRatios = videoRatiosForModel(selectedModel);
+  const allowedVideoResolutions = videoResolutionsForModel(selectedModel);
+  const allowedVideoSeconds = videoSecondsForModel(selectedModel);
+  const allowedVideoModes = isVertexVeoModel(selectedModel)
+    ? [{ value: "reference" as const, label: "文生视频" }]
+    : videoModes;
 
   useEffect(() => {
     let active = true;
@@ -1124,7 +1131,7 @@ function ReplacementCustomizePanel({
 
                       <p className="mb-2 text-xs font-semibold text-zinc-400">生成方式</p>
                       <div className="mb-4 grid grid-cols-3 rounded-xl bg-white/[0.045] p-1">
-                        {videoModes.map((mode) => (
+                        {allowedVideoModes.map((mode) => (
                           <button
                             key={mode.value}
                             className={cn(
@@ -1140,7 +1147,7 @@ function ReplacementCustomizePanel({
 
                       <p className="mb-2 text-xs font-semibold text-zinc-400">宽高比</p>
                       <div className="mb-4 grid grid-cols-4 gap-2">
-                        {videoRatios.map((ratio) => {
+                        {allowedVideoRatios.map((ratio) => {
                           const active = params.ratio === ratio;
                           const isAuto = ratio === "Auto";
                           return (
@@ -1174,19 +1181,19 @@ function ReplacementCustomizePanel({
                       <div className="mb-4">
                         <div className="mb-2 flex items-center justify-between text-xs">
                           <span className="font-semibold text-zinc-400">时长</span>
-                          <span className="text-zinc-500">{params.seconds}s / max 15s</span>
+                          <span className="text-zinc-500">{params.seconds}s / max {allowedVideoSeconds.at(-1)}s</span>
                         </div>
                         <input
                           className="w-full accent-white"
                           type="range"
                           min={0}
-                          max={videoSeconds.length - 1}
+                          max={allowedVideoSeconds.length - 1}
                           step={1}
-                          value={videoSeconds.indexOf(params.seconds)}
-                          onChange={(event) => updateParams({ seconds: videoSeconds[Number(event.target.value)] })}
+                          value={allowedVideoSeconds.indexOf(params.seconds)}
+                          onChange={(event) => updateParams({ seconds: allowedVideoSeconds[Number(event.target.value)] })}
                         />
                         <div className="mt-1 flex justify-between text-[10px] text-zinc-500">
-                          {videoSeconds.map((second) => (
+                          {allowedVideoSeconds.map((second) => (
                             <span key={second}>{second}s</span>
                           ))}
                         </div>
@@ -1194,7 +1201,7 @@ function ReplacementCustomizePanel({
 
                       <p className="mb-2 text-xs font-semibold text-zinc-400">分辨率</p>
                       <div className="mb-4 flex flex-wrap gap-2">
-                        {videoResolutions.map((resolution) => (
+                        {allowedVideoResolutions.map((resolution) => (
                           <button
                             key={resolution}
                             className={cn(
@@ -1928,6 +1935,17 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
   const accent = nodeData.accent ?? "#8b5cf6";
   const title = displayStudioNodeTitle(nodeData.label, nodeType, nodeData.config);
   const baseItems = nodeData.items ?? [];
+  const generatedImageNode =
+    nodeType === "sceneAsset" &&
+    (nodeData.config.mode === "referenced_image" || nodeData.label.includes("图片生成"));
+  const generatedImageParameterSummary = [
+    typeof nodeData.config.ratio === "string" ? nodeData.config.ratio : "",
+    typeof nodeData.config.quality === "string" ? nodeData.config.quality : "",
+    typeof nodeData.config.resolution === "string" ? nodeData.config.resolution : "",
+    typeof nodeData.config.count === "number" ? `${nodeData.config.count}张` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
   const hiddenCompletedVideoItems = new Set([
     "项目内已缓存",
     "缓存失败，可重试查看",
@@ -1940,6 +1958,9 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
     if (nodeType === "imageUpload") {
       const imageCount = Array.isArray(nodeData.config.images) ? nodeData.config.images.length : 1;
       return [`${imageCount} 张图片已上传`, "上传 Lovart 主体"];
+    }
+    if (generatedImageNode && status === "done") {
+      return baseItems.filter((item) => item !== generatedImageParameterSummary);
     }
     if (nodeType !== "videoGeneration" || status !== "done") return baseItems;
     return baseItems.filter((item) => !hiddenCompletedVideoItems.has(item));
@@ -1982,9 +2003,7 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
     setPreviewVideoUrl(videoUrl);
     setShowVideoPlayer(true);
   };
-  const isGeneratedImageNode =
-    nodeType === "sceneAsset" &&
-    (nodeData.config.mode === "referenced_image" || nodeData.label.includes("图片生成"));
+  const isGeneratedImageNode = generatedImageNode;
   const generatedAsset = generatedAssetOption(nodeData.config.assetTag);
   const Icon = isGeneratedImageNode ? generatedAsset.icon : iconMap[nodeType] ?? Boxes;
   const imageItems = nodeType === "imageUpload" || isGeneratedImageNode ? getImageItems(nodeData.config) : [];
@@ -2131,16 +2150,19 @@ export function VideoStudioNode({ id, data, selected, type }: NodeProps) {
       style={{ ["--node-accent" as string]: accent }}
     >
       <div className="mb-3 flex items-start justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-3">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
           <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-[var(--node-accent)]/18 text-[var(--node-accent)] ring-1 ring-[var(--node-accent)]/35">
             <Icon className="size-4" />
           </div>
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <div className="truncate text-[15px] font-semibold tracking-[-0.01em]">
               {title}
             </div>
             {displayMetric && (
-              <div className="mt-1 font-mono text-[10px] uppercase text-zinc-500">
+              <div
+                className="mt-1 w-full truncate font-mono text-[10px] uppercase text-zinc-500"
+                title={displayMetric}
+              >
                 {displayMetric}
               </div>
             )}

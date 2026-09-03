@@ -25,6 +25,14 @@ from lovart import (
     release_lovart_tasks,
 )
 from models import Asset, Flow, User
+from providers.vertex_ai import (
+    VERTEX_IMAGE_TASK_PREFIX,
+    VertexAIError,
+    VertexImage,
+    generate_vertex_images,
+    is_vertex_image_model,
+    vertex_image_model_options,
+)
 from storage import object_key_for_asset, safe_storage_name, storage
 
 router = APIRouter(prefix="/image", tags=["image"])
@@ -140,12 +148,13 @@ def _patch_flow_image_generation_task(
                 "taskCreatedAt": config.get("taskCreatedAt") or now,
             }
         )
+        provider_name = "Vertex AI" if is_vertex_image_model(model) else "Lovart"
         data.update(
             {
                 "status": "running",
-                "metric": "Lovart 已排队",
+                "metric": f"{provider_name} 已提交",
                 "config": config,
-                "items": ["Lovart 生成中", "正在获取结果", _image_output_summary(payload)],
+                "items": [f"{provider_name} 生成中", "正在获取结果", _image_output_summary(payload)],
             }
         )
         node["data"] = data
@@ -161,6 +170,11 @@ def _map_lovart_error(error: LovartAPIError) -> HTTPException:
     status = error.status_code if error.status_code >= 400 else 502
     if error.status_code == 0:
         status = 500
+    return HTTPException(status_code=status, detail=error.detail)
+
+
+def _map_vertex_error(error: VertexAIError) -> HTTPException:
+    status = error.status_code if 400 <= error.status_code < 600 else 502
     return HTTPException(status_code=status, detail=error.detail)
 
 
@@ -185,9 +199,9 @@ def _lovart_text_message(task: dict[str, Any]) -> Optional[str]:
 
 def _select_image_model(model: str | None) -> str:
     selected = (model or DEFAULT_LOVART_IMAGE_MODEL).strip() or DEFAULT_LOVART_IMAGE_MODEL
-    allowed = {option["model"] for option in lovart_image_model_options()}
+    allowed = {option["model"] for option in [*lovart_image_model_options(), *vertex_image_model_options()]}
     if selected not in allowed:
-        raise HTTPException(status_code=400, detail="unsupported Lovart image model")
+        raise HTTPException(status_code=400, detail="不支持的图片生成模型")
     return selected
 
 
@@ -269,6 +283,55 @@ async def _save_lovart_images(
     return saved
 
 
+def _save_vertex_images(
+    *,
+    db: Session,
+    user: User,
+    task_id: str,
+    flow_id: Optional[str],
+    node_id: Optional[str],
+    model: str,
+    images: list[VertexImage],
+) -> list[ImageAssetOut]:
+    saved: list[ImageAssetOut] = []
+    for index, image in enumerate(images, start=1):
+        remote_id = f"{task_id}:{index}"
+        existing = (
+            db.query(Asset)
+            .filter(Asset.user_id == user.id, Asset.kind == "generated_image", Asset.remote_id == remote_id)
+            .first()
+        )
+        if existing:
+            saved.append(_asset_out(existing))
+            continue
+
+        extension = ".jpg" if "jpeg" in image.mime_type else ".webp" if "webp" in image.mime_type else ".png"
+        asset_id = str(uuid.uuid4())
+        filename = f"vertex-gemini-image-{index}{extension}"
+        storage_key = object_key_for_asset(asset_id, "generated_image", safe_storage_name(filename))
+        stored = storage.save_bytes(storage_key, image.data)
+        asset = Asset(
+            id=asset_id,
+            user_id=user.id,
+            flow_id=flow_id,
+            node_id=node_id,
+            kind="generated_image",
+            title=f"Gemini 生成图 {index}",
+            mime_type=image.mime_type,
+            storage_key=stored.storage_key,
+            public_url=stored.public_url,
+            size_bytes=stored.size,
+            provider="vertex-ai",
+            remote_id=remote_id,
+            asset_metadata={"taskId": task_id, "model": model, "provider": "vertex-ai"},
+        )
+        db.add(asset)
+        db.commit()
+        db.refresh(asset)
+        saved.append(_asset_out(asset))
+    return saved
+
+
 def _asset_out(asset: Asset) -> ImageAssetOut:
     return ImageAssetOut(
         id=asset.id,
@@ -306,7 +369,10 @@ def _saved_lovart_images(
 
 @router.get("/models")
 def image_models():
-    return {"models": lovart_image_model_options(), "default": DEFAULT_LOVART_IMAGE_MODEL}
+    return {
+        "models": [*vertex_image_model_options(), *lovart_image_model_options()],
+        "default": DEFAULT_LOVART_IMAGE_MODEL,
+    }
 
 
 @router.post("/generate", response_model=ImageGenerateResponse)
@@ -326,6 +392,50 @@ async def generate_image(
         units=payload.count,
         note=f"图片生成 {payload.count} 张 · {model}",
     )
+    if is_vertex_image_model(model):
+        try:
+            reference_images = _resolve_reference_images(db, user, payload.reference_images)
+            images = await generate_vertex_images(
+                prompt=payload.prompt,
+                model=model,
+                aspect_ratio=payload.ratio,
+                count=payload.count,
+                reference_images=reference_images,
+            )
+            task_id = f"{VERTEX_IMAGE_TASK_PREFIX}{uuid.uuid4()}"
+            _save_vertex_images(
+                db=db,
+                user=user,
+                task_id=task_id,
+                flow_id=payload.flowId,
+                node_id=payload.nodeId,
+                model=model,
+                images=images,
+            )
+        except VertexAIError as exc:
+            refund_generation_credits(db, user, charge, reason=exc.detail)
+            raise _map_vertex_error(exc) from exc
+        except Exception as exc:
+            refund_generation_credits(db, user, charge, reason=str(exc))
+            raise
+
+        finalize_generation_charge(db, charge, task_id)
+        _patch_flow_image_generation_task(
+            db=db,
+            user=user,
+            payload=payload,
+            task_id=task_id,
+            project_id=None,
+            model=model,
+        )
+        return ImageGenerateResponse(
+            id=task_id,
+            model=model,
+            status="completed",
+            creditsCharged=charge.amount if charge else 0,
+            creditBalance=user.credit_balance,
+        )
+
     results = []
     try:
         reference_images = _resolve_reference_images(db, user, payload.reference_images)
@@ -391,6 +501,25 @@ async def get_image_generation_status(
     user: User = Depends(get_current_user),
 ):
     _ensure_flow_owner(db, flowId, user)
+    if task_id.startswith(VERTEX_IMAGE_TASK_PREFIX):
+        saved_assets = _saved_lovart_images(db, user, task_id, flow_id=flowId, node_id=nodeId)
+        if not saved_assets:
+            return ImageGenerationStatus(
+                id=task_id,
+                model=model,
+                status="failed",
+                error="Vertex AI 图片结果不存在或已被清理",
+                raw={"source": "vertex-ai"},
+            )
+        return ImageGenerationStatus(
+            id=task_id,
+            model=model,
+            status="completed",
+            imageUrls=[asset.url for asset in saved_assets],
+            assets=saved_assets,
+            raw={"source": "vertex-ai", "archived": True},
+        )
+
     task_ids = _image_batch_task_ids(task_id)
     saved_assets = _saved_lovart_images(db, user, task_id, flow_id=flowId, node_id=nodeId)
     if saved_assets:

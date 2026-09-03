@@ -19,6 +19,17 @@ from billing import finalize_generation_charge, refund_generation_credits, reser
 from database import get_db
 from lovart import LovartAPIError, LovartClient, release_lovart_tasks
 from models import Asset, User
+from providers.vertex_ai import (
+    VERTEX_VIDEO_MODEL,
+    VERTEX_VIDEO_TASK_PREFIX,
+    VertexAIError,
+    create_vertex_video,
+    download_vertex_video,
+    get_vertex_video_operation,
+    is_vertex_video_model,
+    vertex_video_model_options,
+    vertex_video_status,
+)
 from storage import safe_storage_name, storage
 
 router = APIRouter(prefix="/video", tags=["video"])
@@ -173,8 +184,9 @@ class VideoSpecRequest(BaseModel):
 
 
 def _video_model_options() -> list[dict[str, str]]:
-    options: list[dict[str, str]] = []
+    options: list[dict[str, str]] = list(vertex_video_model_options())
     seen: set[str] = set()
+    seen.update(item["model"] for item in options)
     for raw_item in TOKENOPS_GENERATION_MODELS.split(","):
         item = raw_item.strip()
         if not item:
@@ -219,6 +231,26 @@ def _is_tokenops_video_model(model: str) -> bool:
 
 def _is_mulerouter_video_model(model: str) -> bool:
     return model in {WAN22_I2V_MODEL, WAN27_I2V_MODEL}
+
+
+def _map_vertex_error(error: VertexAIError) -> HTTPException:
+    status = error.status_code if 400 <= error.status_code < 600 else 502
+    return HTTPException(status_code=status, detail=error.detail)
+
+
+async def _get_vertex_video_status(video_id: str) -> dict[str, Any]:
+    try:
+        operation = await get_vertex_video_operation(video_id, VERTEX_VIDEO_MODEL)
+        return vertex_video_status(video_id, VERTEX_VIDEO_MODEL, operation)
+    except VertexAIError as exc:
+        raise _map_vertex_error(exc) from exc
+
+
+async def _download_vertex_video(video_id: str) -> tuple[bytes, str]:
+    try:
+        return await download_vertex_video(video_id, VERTEX_VIDEO_MODEL)
+    except VertexAIError as exc:
+        raise _map_vertex_error(exc) from exc
 
 
 def _tokenops_video_reference_limit(model: str) -> int:
@@ -2107,6 +2139,15 @@ def _validate_generation_request(payload: VideoGenerateRequest) -> None:
     if payload.resolution not in SEEDANCE_RESOLUTIONS:
         raise HTTPException(status_code=400, detail="不支持的视频分辨率")
 
+    if is_vertex_video_model(model):
+        if payload.ratio not in {"16:9", "9:16"}:
+            raise HTTPException(status_code=400, detail="Vertex Veo 仅支持 16:9 或 9:16")
+        if payload.resolution not in {"720p", "1080p"}:
+            raise HTTPException(status_code=400, detail="Vertex Veo 仅支持 720p 或 1080p")
+        if payload.seconds not in {4, 6, 8}:
+            raise HTTPException(status_code=400, detail="Vertex Veo 仅支持 4、6 或 8 秒")
+        return
+
     if model == WAN22_I2V_MODEL:
         if payload.resolution not in {"480p", "720p"}:
             raise HTTPException(status_code=400, detail="Wan 2.2 仅支持 480p/720p")
@@ -2143,6 +2184,18 @@ async def _generate_video_without_billing(
 ):
     _validate_generation_request(payload)
     model = _select_generation_model(payload)
+    if is_vertex_video_model(model):
+        try:
+            return await create_vertex_video(
+                prompt=payload.prompt,
+                model=model,
+                aspect_ratio=payload.ratio,
+                resolution=payload.resolution,
+                seconds=payload.seconds,
+                generate_audio=payload.generate_audio,
+            )
+        except VertexAIError as exc:
+            raise _map_vertex_error(exc) from exc
     if _is_bds_model(model):
         return await _create_bds_video(payload, db, user)
     if _is_mulerouter_video_model(model):
@@ -2251,6 +2304,8 @@ async def get_generated_video_status(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    if video_id.startswith(VERTEX_VIDEO_TASK_PREFIX):
+        return await _get_vertex_video_status(video_id)
     if video_id.startswith(f"{BDS_PRO_MODEL}:"):
         return await _get_bds_status(video_id)
     if video_id.startswith(WAN_VIDEO_PREFIX):
@@ -2287,6 +2342,9 @@ async def download_generated_video(
     video_id: str,
     _: User = Depends(get_current_user),
 ):
+    if video_id.startswith(VERTEX_VIDEO_TASK_PREFIX):
+        content, media_type = await _download_vertex_video(video_id)
+        return Response(content=content, media_type=media_type)
     if video_id.startswith(f"{BDS_PRO_MODEL}:"):
         content, media_type = await _download_bds_video(video_id)
         return Response(content=content, media_type=media_type)

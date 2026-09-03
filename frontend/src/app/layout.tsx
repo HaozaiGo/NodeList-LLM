@@ -1,5 +1,8 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import Script from "next/script";
+
+import { I18nProvider } from "@/components/i18n/I18nProvider";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -13,8 +16,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "NodeList AI 视频制作工作台",
-  description: "从参考素材到可用成片的 AI 视频制作流水线",
+  title: "enepath.ai Video Production Workspace",
+  description: "An AI video workflow from reference assets to final production",
 };
 
 export default function RootLayout({
@@ -25,9 +28,17 @@ export default function RootLayout({
   return (
     <html
       lang="en"
+      suppressHydrationWarning
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full">{children}</body>
+      <head>
+        <link rel="preconnect" href="https://accounts.google.com" />
+        <link rel="preconnect" href="https://www.gstatic.com" crossOrigin="anonymous" />
+      </head>
+      <body className="min-h-full">
+        <Script src="https://accounts.google.com/gsi/client" strategy="beforeInteractive" />
+        <I18nProvider>{children}</I18nProvider>
+      </body>
     </html>
   );
 }
