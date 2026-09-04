@@ -719,6 +719,8 @@ const UI_PATTERNS: Array<[RegExp, (...parts: string[]) => string]> = [
   [/^每页 (\d+) 条 · 共 (\d+) 位用户$/, (_, size, total) => `${size} per page · ${total} users`],
   [/^(\d+) 张图片，可标记为人物、场景、道具或参考图。$/, (_, count) => `${count} images. Label them as characters, scenes, props, or references.`],
   [/^(\d+) 张$/, (_, count) => `${count} images`],
+  [/^(.+?) · (低画质|标准画质|高画质) · (.+?) · (\d+)张$/, (_, ratio, quality, resolution, count) =>
+    `${ratio} · ${UI_TRANSLATIONS[quality] ?? quality} · ${resolution} · ${count} ${count === "1" ? "image" : "images"}`],
   [/^(\d+) 位用户$/, (_, count) => `${count} users`],
   [/^节点 \/ (.+)$/, (_, value) => `Nodes / ${value}`],
   [/^流程 \/ (.+)$/, (_, value) => `Flow / ${value}`],

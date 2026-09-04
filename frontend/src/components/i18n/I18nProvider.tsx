@@ -8,23 +8,23 @@ import { recoverSourceText, translateUiText, type Locale } from "@/lib/i18n";
 
 const STORAGE_KEY = "enepath_locale";
 const TRANSLATED_ATTRIBUTES = ["placeholder", "title", "aria-label", "alt"] as const;
-const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "CODE", "PRE", "TEXTAREA"]);
+const SKIP_TEXT_TAGS = new Set(["SCRIPT", "STYLE", "CODE", "PRE", "TEXTAREA"]);
 const LocaleContext = createContext<{ locale: Locale; setLocale: (locale: Locale) => void } | null>(null);
 const originalText = new WeakMap<Text, string>();
 const appliedText = new WeakMap<Text, string>();
 const originalAttributes = new WeakMap<Element, Map<string, string>>();
 const appliedAttributes = new WeakMap<Element, Map<string, string>>();
 
-function shouldSkip(element: Element | null) {
-  return (
-    !element ||
-    SKIP_TAGS.has(element.tagName) ||
-    Boolean(element.closest("[data-no-i18n], [contenteditable='true']"))
-  );
+function isLocalizationDisabled(element: Element | null) {
+  return !element || Boolean(element.closest("[data-no-i18n], [contenteditable='true']"));
+}
+
+function shouldSkipText(element: Element | null) {
+  return isLocalizationDisabled(element) || Boolean(element && SKIP_TEXT_TAGS.has(element.tagName));
 }
 
 function localizeTextNode(node: Text, locale: Locale) {
-  if (shouldSkip(node.parentElement)) return;
+  if (shouldSkipText(node.parentElement)) return;
   const current = node.nodeValue ?? "";
   const previousApplied = appliedText.get(node);
   let source = originalText.get(node);
@@ -40,7 +40,7 @@ function localizeTextNode(node: Text, locale: Locale) {
 }
 
 function localizeElementAttributes(element: Element, locale: Locale) {
-  if (shouldSkip(element)) return;
+  if (isLocalizationDisabled(element)) return;
   let originals = originalAttributes.get(element);
   let applied = appliedAttributes.get(element);
   if (!originals) {
@@ -71,8 +71,8 @@ function localizeTree(root: Node, locale: Locale) {
     return;
   }
   if (!(root instanceof Element)) return;
-  if (shouldSkip(root)) return;
   localizeElementAttributes(root, locale);
+  if (shouldSkipText(root)) return;
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
   let node = walker.nextNode();
   while (node) {
